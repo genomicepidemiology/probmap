@@ -1,0 +1,20 @@
+[package]
+name = "probmap"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ahash = { version = "0.8.2", features = ["serde"] }
+nohash-hasher = "0.2.0"
+rustc-hash = "1.1.0"
+bio = "*"
+clap = { version = "4.0", features = ["derive"] }
+csv = "1.2"
+flate2 = "1"
+serde = "1"
+bincode = "1"
+brotli = "3.3.4"
+colored = "2"
+itertools = "0.10.5"
