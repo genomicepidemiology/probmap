@@ -365,8 +365,6 @@ fn create_db(
             // db_kmer_count += kmers.len();
             // db_cap_count += kmers.capacity();
 
-            /*
-
             for kmer in kmers {
                 db.entry(kmer).or_insert(vec![0u64; max_tax_bit_index])[tax_8bit_index.0] |=
                     1 << tax_8bit_index.1;
@@ -377,16 +375,15 @@ fn create_db(
                 //    shared_kmers += 1;
                 //}
             }
-
-            */
         }
 
-        let test_vec = vec![0u64; max_tax_bit_index];
-        println!("Vec: {:?}", test_vec);
-        println!("Size: {}", std::mem::size_of_val(&test_vec));
-        for i in test_vec {
-            println!("\tentry size: {:?}", std::mem::size_of_val(&i));
-        }
+        // ! Memory calc - Do this again with "queue" or "smallvec"
+        // let test_vec = vec![0u64; max_tax_bit_index];
+        // println!("Vec: {:?}", test_vec);
+        // println!("Size: {}", std::mem::size_of_val(&test_vec));
+        // for i in test_vec {
+        //     println!("\tentry size: {:?}", std::mem::size_of_val(&i));
+        // }
 
         // println!(
         //     "kmers pr read: {}",
@@ -442,13 +439,14 @@ fn create_db(
         println!("Size of box:\t{:?}", std::mem::size_of_val(&test_box));
         break;
     }
-    println!("Number of kmers: {}", db.len());
     println!("Shared kmers: {}", &shared_kmers);
 
     // TODO: Uncomment index write
     // serialize_compress_write(output, &db);
 
     */
+
+    println!("Number of kmers: {}", db.len());
 }
 
 fn serialize_compress_write<T>(output: &PathBuf, object: &T)
