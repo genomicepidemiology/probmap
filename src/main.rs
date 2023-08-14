@@ -14,7 +14,7 @@ use std::{
 };
 //use bio::io::fastq;
 use brotli::{CompressorReader, CompressorWriter};
-use clap::{Parser, Subcommand};
+use clap::{builder::OsStr, Parser, Subcommand};
 use colored::*;
 use flate2::read::GzDecoder;
 use flate2::write::ZlibEncoder;
@@ -142,11 +142,14 @@ fn main() {
         }) => {
             let mut file = File::open(&template).unwrap();
             let mut file_decomp_input = brotli::Decompressor::new(&mut file, 4096);
-            let db: AHashMap<usize, Vec<u8>> =
+            let db: AHashMap<usize, Vec<u64>> =
                 bincode::deserialize_from(&mut file_decomp_input).unwrap();
 
+            let mut tax_filename = template.file_name().unwrap().to_owned();
+            tax_filename.push("_tax");
             let mut tax_group_file_path: PathBuf = template.clone();
-            tax_group_file_path.push("_tax");
+            tax_group_file_path.set_file_name(tax_filename);
+
             let mut tax_group_file = File::open(&tax_group_file_path).unwrap();
             let tax_group_file_decomp = brotli::Decompressor::new(&mut tax_group_file, 4096);
             let tax_groups: Vec<String> = bincode::deserialize_from(tax_group_file_decomp).unwrap();
@@ -197,7 +200,7 @@ fn get_unique_tax_groups(metadata_map: &AHashMap<String, MetaEntry>) -> Vec<Stri
 
 fn calc_prob_from_input(
     k: &usize,
-    db: &AHashMap<usize, Vec<u8>>,
+    db: &AHashMap<usize, Vec<u64>>,
     input: &Vec<PathBuf>,
     tax_groups: &Vec<String>,
 ) -> Result<(), std::io::Error> {
@@ -265,7 +268,7 @@ fn calc_prob_from_input(
 
 fn annotate_kmers(
     kmers: &Vec<usize>,
-    db: &AHashMap<usize, Vec<u8>>,
+    db: &AHashMap<usize, Vec<u64>>,
     prior: f64,
     tax_groups_length: usize,
 ) -> Vec<f64> {
@@ -276,7 +279,7 @@ fn annotate_kmers(
             Some(species_list) => {
                 for (int_index, species_int) in species_list.iter().enumerate() {
                     let mut bit_index = 0;
-                    let mut cache: u8 = species_int.clone();
+                    let mut cache: u64 = species_int.clone();
                     while cache != 0 {
                         cache >>= 1;
                         if cache != *species_int {
@@ -322,9 +325,9 @@ fn create_db(
     // let mut db: AHashMap<usize, Vec<u8>> = AHashMap::with_capacity(100000000);
 
     // let mut db: AHashMap<usize, Vec<u64>> = AHashMap::new();
-    // let mut db: AHashMap<usize, Vec<u64>> = AHashMap::with_capacity(100_000_000);
-    let mut db: AHashMap<usize, Vec<u64>, BuildHasherDefault<NoHashHasher<u8>>> =
-        AHashMap::with_hasher(BuildHasherDefault::default());
+    let mut db: AHashMap<usize, Vec<u64>> = AHashMap::with_capacity(100_000_000);
+    // let mut db: AHashMap<usize, Vec<u64>, BuildHasherDefault<NoHashHasher<u8>>> =
+    //     AHashMap::with_hasher(BuildHasherDefault::default());
 
     // let mut db: HashMap<usize, Vec<u64>, BuildHasherDefault<NoHashHasher<u8>>> =
     //     HashMap::with_capacity_and_hasher(100_000_000, BuildHasherDefault::default());
@@ -416,35 +419,32 @@ fn create_db(
     }
 
     // TODO MEM debug
-    /*
 
     // TODO remove debug print
-    println!("DB size end:\t{:?}", std::mem::size_of_val(&db));
-    for (kmer, tax_vec) in &db {
-        println!("{:?}\t{:?}", kmer, tax_vec);
-        println!("Size of vec:\t{:?}", std::mem::size_of_val(tax_vec));
-        println!("Size of key:\t{:?}", std::mem::size_of_val(kmer));
-        let one: Vec<u8> = vec![0u8; 1];
-        println!("Size vec size 1:\t{:?}", std::mem::size_of_val(&one));
-        let empty: Vec<u8> = vec![0u8; 0];
-        println!("Size empty vec:\t{:?}", std::mem::size_of_val(&empty));
+    // println!("DB size end:\t{:?}", std::mem::size_of_val(&db));
+    // for (kmer, tax_vec) in &db {
+    //     println!("{:?}\t{:?}", kmer, tax_vec);
+    //     println!("Size of vec:\t{:?}", std::mem::size_of_val(tax_vec));
+    //     println!("Size of key:\t{:?}", std::mem::size_of_val(kmer));
+    //     let one: Vec<u8> = vec![0u8; 1];
+    //     println!("Size vec size 1:\t{:?}", std::mem::size_of_val(&one));
+    //     let empty: Vec<u8> = vec![0u8; 0];
+    //     println!("Size empty vec:\t{:?}", std::mem::size_of_val(&empty));
 
-        let test_ar: [u64; 4] = [0u64; 4];
-        let mut test_box: Box<[u64; 4]> = Box::new([0u64; 4]);
-        test_box[0] = 12u64;
-        test_box[1] = 122u64;
-        test_box[2] = 12332u64;
-        test_box[3] = 1234322u64;
-        println!("Size of ar:\t{:?}", std::mem::size_of_val(&test_ar));
-        println!("Size of box:\t{:?}", std::mem::size_of_val(&test_box));
-        break;
-    }
-    println!("Shared kmers: {}", &shared_kmers);
+    //     let test_ar: [u64; 4] = [0u64; 4];
+    //     let mut test_box: Box<[u64; 4]> = Box::new([0u64; 4]);
+    //     test_box[0] = 12u64;
+    //     test_box[1] = 122u64;
+    //     test_box[2] = 12332u64;
+    //     test_box[3] = 1234322u64;
+    //     println!("Size of ar:\t{:?}", std::mem::size_of_val(&test_ar));
+    //     println!("Size of box:\t{:?}", std::mem::size_of_val(&test_box));
+    //     break;
+    // }
+    // println!("Shared kmers: {}", &shared_kmers);
 
     // TODO: Uncomment index write
-    // serialize_compress_write(output, &db);
-
-    */
+    serialize_compress_write(output, &db);
 
     println!("Number of kmers: {}", db.len());
 }
