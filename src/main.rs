@@ -34,6 +34,7 @@ const OUTPUT_EXT: &str = "prmap";
    TODO: Implement smarter species array, "zeroes" should just be a u64, with
    TODO: the first bit either set or unset. Species u64 has the opposite and
    TODO: only keeps 63 bits for species.
+   TODO: Change Vec with ThinVec
 */
 
 #[derive(Parser)]
@@ -154,6 +155,9 @@ fn main() {
             let tax_group_file_decomp = brotli::Decompressor::new(&mut tax_group_file, 4096);
             let tax_groups: Vec<String> = bincode::deserialize_from(tax_group_file_decomp).unwrap();
 
+            // TODO DEBUG print
+            println!("tax_groups: {:?}", tax_groups);
+
             calc_prob_from_input(&kmersize, &db, &input, &tax_groups);
         }
         Some(Commands::Index {
@@ -207,20 +211,39 @@ fn calc_prob_from_input(
     let max_kmer_bit = max_bits(k * 2);
     let kmer_overflow_bits = usize::MAX - max_kmer_bit;
 
-    let prior: f64 = 1.0 / tax_groups.len() as f64;
+    // prior is 1 divided by number of species in database + 1 for unkown.
+    let prior: f64 = 1.0 / (tax_groups.len() + 1) as f64;
+
+    // TODO debug print
+    // println!("Prior: {}", prior);
+
     let mut record_counter: usize = 0;
-    let mut species_sum_probs: Vec<f64> = vec![prior; tax_groups.len()];
+    // +1 for unkown species
+    let mut species_sum_probs: Vec<f64> = vec![prior; tax_groups.len() + 1];
 
-    let mut fq_records: Vec<Records<BufReader<File>>> = vec![];
+    // TODO debug print
+    // println!("species sum prob 0: {:?}", species_sum_probs);
 
-    for fq_file_path in input {
-        let fq_file = fs::File::open(fq_file_path).unwrap();
-        fq_records.push(fastq::Reader::new(fq_file).records());
-    }
+    // let mut fq_records: Vec<Records<BufReader<GzDecoder<&mut File>>>> = vec![];
 
+    // for fq_file_path in input {
+    //     let mut fq_file = fs::File::open(fq_file_path).unwrap();
+    //     let decoder = GzDecoder::new(&mut fq_file);
+    //     fq_records.push(fastq::Reader::new(decoder).records());
+    // }
+
+    let mut fq_records: Vec<Records<BufReader<GzDecoder<File>>>> = input
+        .iter()
+        .map(|path| fs::File::open(path).unwrap())
+        .map(|file| GzDecoder::new(file))
+        .map(|decoder| fastq::Reader::new(decoder).records())
+        .collect();
+
+    // TODO DEBUG
+    // println!("Here comes:3");
     while let Some(Ok(record)) = fq_records[0].next() {
         record_counter += 1;
-        let mut kmers: Vec<usize> = vec![];
+        let mut kmers: Vec<usize> = vec![]; // !Should this be a tuple?
 
         kmers.extend(get_kmers(
             record.seq(),
@@ -228,7 +251,8 @@ fn calc_prob_from_input(
             &max_kmer_bit,
             &kmer_overflow_bits,
         ));
-
+        // TODO DEBUG
+        // println!("Here comes:2");
         match fq_records.get_mut(1) {
             Some(fq_record_rev) => {
                 if let Some(Ok(record_rev)) = fq_record_rev.next() {
@@ -250,6 +274,9 @@ fn calc_prob_from_input(
         };
 
         let read_species_distr: Vec<f64> = annotate_kmers(&kmers, db, prior, tax_groups.len());
+        // TODO DEBUG print
+        // println!("Here comes:");
+        // println!("read_species_distr: {:?}", read_species_distr);
         for (i, prob) in read_species_distr.iter().enumerate() {
             species_sum_probs[i] += *prob;
         }
@@ -272,19 +299,31 @@ fn annotate_kmers(
     prior: f64,
     tax_groups_length: usize,
 ) -> Vec<f64> {
-    let mut sample_counts: Vec<usize> = vec![0; tax_groups_length];
+    // index 0 in sample counts are unkown kmers.
+    // Indexes >1 are species from species vec.
+    let mut sample_counts: Vec<usize> = vec![0; tax_groups_length + 1];
+
+    // TODO debug var
+    let mut debug = false;
+    // println!("debug set to true");
 
     for kmer in kmers {
         match db.get(kmer) {
             Some(species_list) => {
+                // TODO debug
+                if debug == true {
+                    println!("Species list: {:?}", species_list);
+                }
+
                 for (int_index, species_int) in species_list.iter().enumerate() {
                     let mut bit_index = 0;
-                    let mut cache: u64 = species_int.clone();
+                    let mut cache: u64 = species_int.clone(); // Guess ints are copied so no need to clone
                     while cache != 0 {
-                        cache >>= 1;
-                        if cache != *species_int {
-                            sample_counts[int_index + bit_index] += 1;
+                        // Uneven cache == 1. Uneven cache -> rightmost bit is 1
+                        if (cache & 1) == 1 {
+                            sample_counts[int_index + bit_index + 1] += 1;
                         }
+                        cache >>= 1;
                         bit_index += 1;
                     }
                 }
@@ -293,7 +332,32 @@ fn annotate_kmers(
                 sample_counts[0] += 1;
             }
         }
+        // TODO debug var
+        debug = false;
     }
+
+    // for kmer in kmers {
+    //     match db.get(kmer) {
+    //         Some(species_list) => {
+    //             for (int_index, species_int) in species_list.iter().enumerate() {
+    //                 let mut bit_index = 0;
+    //                 let mut cache: u64 = species_int.clone();
+    //                 while cache != 0 {
+    //                     cache >>= 1;
+    //                     if cache != *species_int {
+    //                         sample_counts[int_index + bit_index] += 1;
+    //                     }
+    //                     bit_index += 1;
+    //                 }
+    //             }
+    //         }
+    //         None => {
+    //             sample_counts[0] += 1;
+    //         }
+    //     }
+    // }
+
+    // println!("Sample counts: {:?}", &sample_counts);
 
     calc_probs(&sample_counts, prior)
 }
