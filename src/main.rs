@@ -382,14 +382,14 @@ fn create_db(
     let max_kmer_bit = max_bits(k * 2);
     let kmer_overflow_bits = usize::MAX - max_kmer_bit;
 
-    let max_tax_bit_index = (tax_groups.len() as f32 / 64.0).ceil() as usize;
-    // let max_tax_bit_index = (tax_groups.len() as f32 / 8.0).ceil() as usize;  //  ! REMEMBER TO SET BIT SIZE
+    //let max_tax_bit_index = (tax_groups.len() as f32 / 64.0).ceil() as usize;
+    let max_tax_bit_index = (tax_groups.len() as f32 / 8.0).ceil() as usize; //  ! REMEMBER TO SET BIT SIZE
 
     // let mut db: AHashMap<usize, AHashSet<u32>> = AHashMap::with_capacity(1000000);
     // let mut db: AHashMap<usize, Vec<u8>> = AHashMap::with_capacity(100000000);
 
     // let mut db: AHashMap<usize, Vec<u64>> = AHashMap::new();
-    let mut db: AHashMap<usize, Vec<u64>> = AHashMap::with_capacity(100_000_000);
+    let mut db: AHashMap<usize, Vec<u8>> = AHashMap::with_capacity(100_000_000);
     // let mut db: AHashMap<usize, Vec<u64>, BuildHasherDefault<NoHashHasher<u8>>> =
     //     AHashMap::with_hasher(BuildHasherDefault::default());
 
@@ -433,10 +433,10 @@ fn create_db(
             // db_cap_count += kmers.capacity();
 
             for kmer in kmers {
-                db.entry(kmer).or_insert(vec![0u64; max_tax_bit_index])[tax_8bit_index.0] |=
-                    1 << tax_8bit_index.1;
-                // db.entry(kmer).or_insert(vec![0u8; max_tax_bit_index])[tax_8bit_index.0] |= //  ! REMEMBER TO SET BIT SIZE
+                // db.entry(kmer).or_insert(vec![0u64; max_tax_bit_index])[tax_8bit_index.0] |=
                 //     1 << tax_8bit_index.1;
+                db.entry(kmer).or_insert(vec![0u8; max_tax_bit_index])[tax_8bit_index.0] |=  //  ! REMEMBER TO SET BIT SIZE
+                    1 << tax_8bit_index.1;
 
                 //if db.contains_key(&kmer) {
                 //    shared_kmers += 1;
@@ -534,10 +534,12 @@ fn get_tax_8bit_index(meta_entry: &MetaEntry, tax_groups: &Vec<String>) -> (usiz
 
     match tax_index {
         Some((index, _)) => {
-            let sub_index = index % 64;
-            // let sub_index = index % 8; //  ! REMEMBER TO SET BIT SIZE
-            let bit_index = (index - sub_index) / 64;
-            // let bit_index = (index - sub_index) / 8; //  ! REMEMBER TO SET BIT SIZE
+            // let sub_index = index % 64;
+            let sub_index = index % 8; //  ! REMEMBER TO SET BIT SIZE
+
+            // let bit_index = (index - sub_index) / 64;
+            let bit_index = (index - sub_index) / 8; //  ! REMEMBER TO SET BIT SIZE
+
             return (bit_index, sub_index);
         }
         None => unreachable!(),
