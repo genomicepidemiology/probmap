@@ -1107,6 +1107,11 @@ fn create_metadata_record(
 ) -> Option<MetaEntry> {
     let accession: Vec<&str> = csv_record["accession"].trim().split(&['_', '.']).collect();
 
+    if accession.len() < 4 {
+        println!("Weird accession no.: {:?}", accession);
+        return None;
+    }
+
     let filename = format!(
         "{}_{}.{}_genomic.fna.gz",
         accession[1], accession[2], accession[3]
