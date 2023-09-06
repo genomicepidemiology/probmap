@@ -1,3 +1,5 @@
+// TODO: Not necessarry to find index for each file, only each species
+
 // use ahash::{AHashMap, AHashSet, HashMap, HashMapExt};
 use ahash::{AHashMap, AHashSet, HashMapExt};
 use bio::io::{
@@ -29,13 +31,6 @@ use std::fs::File;
 use std::io;
 
 const OUTPUT_EXT: &str = "prmap";
-
-/*
-   TODO: Implement smarter species array, "zeroes" should just be a u64, with
-   TODO: the first bit either set or unset. Species u64 has the opposite and
-   TODO: only keeps 63 bits for species.
-   TODO: Change Vec with ThinVec
-*/
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -131,9 +126,6 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
 
-    // let max_kmer_bit = max_bits(&cli.kmersize * 2); // TODO twice in code
-    // let _kmer_overflow_bits = usize::MAX - max_kmer_bit; // TODO twice in code
-
     match &cli.command {
         Some(Commands::Map {
             input,
@@ -172,10 +164,6 @@ fn main() {
                 Err(_) => unreachable!(),
             };
 
-            // TODO Debug print
-            // println!("{:?}", metadata_map);
-
-            // TODO: Mem debug
             let tax_groups: Vec<String> = get_unique_tax_groups(&metadata_map);
             let mut tax_group_file = output.clone();
             let derived_tax_filename = format!(
@@ -185,7 +173,6 @@ fn main() {
             );
             tax_group_file.set_file_name(derived_tax_filename);
             serialize_compress_write(&tax_group_file, &tax_groups);
-            // println!("Tax groups: {:?}", tax_groups);
 
             create_db(&metadata_map, &kmersize, &tax_groups, &output);
         }
@@ -214,23 +201,9 @@ fn calc_prob_from_input(
     // prior is 1 divided by number of species in database + 1 for unkown.
     let prior: f64 = 1.0 / (tax_groups.len() + 1) as f64;
 
-    // TODO debug print
-    // println!("Prior: {}", prior);
-
     let mut record_counter: usize = 0;
     // +1 for unkown species
     let mut species_sum_probs: Vec<f64> = vec![prior; tax_groups.len() + 1];
-
-    // TODO debug print
-    // println!("species sum prob 0: {:?}", species_sum_probs);
-
-    // let mut fq_records: Vec<Records<BufReader<GzDecoder<&mut File>>>> = vec![];
-
-    // for fq_file_path in input {
-    //     let mut fq_file = fs::File::open(fq_file_path).unwrap();
-    //     let decoder = GzDecoder::new(&mut fq_file);
-    //     fq_records.push(fastq::Reader::new(decoder).records());
-    // }
 
     let mut fq_records: Vec<Records<BufReader<GzDecoder<File>>>> = input
         .iter()
@@ -239,11 +212,9 @@ fn calc_prob_from_input(
         .map(|decoder| fastq::Reader::new(decoder).records())
         .collect();
 
-    // TODO DEBUG
-    // println!("Here comes:3");
     while let Some(Ok(record)) = fq_records[0].next() {
         record_counter += 1;
-        let mut kmers: Vec<usize> = vec![]; // !Should this be a tuple?
+        let mut kmers: Vec<usize> = vec![]; // !Should this be a HashSet?
 
         kmers.extend(get_kmers(
             record.seq(),
@@ -251,8 +222,7 @@ fn calc_prob_from_input(
             &max_kmer_bit,
             &kmer_overflow_bits,
         ));
-        // TODO DEBUG
-        // println!("Here comes:2");
+
         match fq_records.get_mut(1) {
             Some(fq_record_rev) => {
                 if let Some(Ok(record_rev)) = fq_record_rev.next() {
@@ -274,9 +244,7 @@ fn calc_prob_from_input(
         };
 
         let read_species_distr: Vec<f64> = annotate_kmers(&kmers, db, prior, tax_groups.len());
-        // TODO DEBUG print
-        // println!("Here comes:");
-        // println!("read_species_distr: {:?}", read_species_distr);
+
         for (i, prob) in read_species_distr.iter().enumerate() {
             species_sum_probs[i] += *prob;
         }
@@ -303,33 +271,19 @@ fn annotate_kmers(
     // Indexes >=1 are species from species vec.
     let mut sample_counts: Vec<usize> = vec![0; tax_groups_length + 1];
 
-    // TODO debug var
-    let mut debug = false;
-    // println!("debug set to true");
-
     for kmer in kmers {
         match db.get(kmer) {
             Some(tax_bit_encoded_list) => {
-                // TODO debug
-                if debug == true {
-                    println!("tax_bit_encoded_list list: {:?}", tax_bit_encoded_list);
-                }
                 let tax_list = extract_tax_from_list(tax_bit_encoded_list);
                 for tax_index in &tax_list {
                     sample_counts[tax_index + 1] += 1; // + 1 as 0 index is unknown.
-                }
-                if debug == true {
-                    println!("tax_list list: {:?}", tax_list);
                 }
             }
             None => {
                 sample_counts[0] += 1;
             }
         }
-        // TODO debug var
-        debug = false;
     }
-    // println!("Sample counts: {:?}", &sample_counts);
 
     calc_probs(&sample_counts, prior)
 }
@@ -409,145 +363,32 @@ fn create_db(
     let max_kmer_bit = max_bits(k * 2);
     let kmer_overflow_bits = usize::MAX - max_kmer_bit;
 
-    //let max_tax_bit_index = (tax_groups.len() as f32 / 64.0).ceil() as usize;
-    let max_tax_bit_index = (tax_groups.len() as f32 / 8.0).ceil() as usize; //  ! REMEMBER TO SET BIT SIZE
-
-    // let mut db: AHashMap<usize, AHashSet<u32>> = AHashMap::with_capacity(1000000);
-    // let mut db: AHashMap<usize, Vec<u8>> = AHashMap::with_capacity(100000000);
-
-    // let mut db: AHashMap<usize, Vec<u64>> = AHashMap::new();
     let mut db: AHashMap<usize, Vec<u8>> = AHashMap::with_capacity(100_000_000);
-    // let mut db: AHashMap<usize, Vec<u64>, BuildHasherDefault<NoHashHasher<u8>>> =
-    //     AHashMap::with_hasher(BuildHasherDefault::default());
-
-    // let mut db: HashMap<usize, Vec<u64>, BuildHasherDefault<NoHashHasher<u8>>> =
-    //     HashMap::with_capacity_and_hasher(100_000_000, BuildHasherDefault::default());
-    // let mut db: HashMap<usize, Vec<u64>, BuildHasherDefault<NoHashHasher<u8>>> =
-    //     HashMap::with_hasher(BuildHasherDefault::default());
-
-    // let mut db: IntMap<usize, Vec<u64>> = IntMap::default();
-    // let mut db: IntMap<usize, Vec<u64>> = IntMap::default();
-
-    // let mut db: FxHashMap<usize, Vec<u64>> = FxHashMap::with_capacity(100_000_000);
-
-    // let mut db: AHashMap<usize, Vec<u8>> = AHashMap::new(); //  ! REMEMBER TO SET BIT SIZE
-
-    // TODO remove debug print
-    println!("DB size start: {:?}", std::mem::size_of_val(&db));
-    let mut shared_kmers = 0;
 
     for metadata in metadata_map.values() {
-        // TODO: Not necessarry to find index for each file, only each species
-        // let tax_8bit_index: (usize, usize) = get_tax_8bit_index(metadata, tax_groups);
-
         let tax_index: usize = get_tax_index(metadata, tax_groups);
 
-        // let tax_8bit_index: (usize, usize) = get_tax_8bit_index(metadata, tax_groups);  //  ! REMEMBER TO SET BIT SIZE
         let mut file = fs::File::open(&metadata.path).unwrap(); // TODO std::io::Error
 
         let decoder = GzDecoder::new(&mut file);
         let records = fasta::Reader::new(decoder).records();
 
-        // TODO Debug code
-        // let mut db_kmer_count = 0;
-        // let mut db_cap_count = 0;
-        // let mut db_read_count = 0;
-
         for record in records {
             let kmers: AHashSet<usize> =
                 get_unique_kmers(record.unwrap().seq(), k, &max_kmer_bit, &kmer_overflow_bits);
 
-            // TODO rremove
-            // db_read_count += 1;
-            // db_kmer_count += kmers.len();
-            // db_cap_count += kmers.capacity();
-
             for kmer in kmers {
-                // db.entry(kmer).or_insert(vec![0u64; max_tax_bit_index])[tax_8bit_index.0] |=
-                //     1 << tax_8bit_index.1;
-
                 annotate_kmer_with_tax(&mut db, kmer, tax_index)
-
-                // db.entry(kmer).or_insert(vec![0u8; max_tax_bit_index])[tax_8bit_index.0] |=  //  ! REMEMBER TO SET BIT SIZE
-                //    1 << tax_8bit_index.1;
-
-                //if db.contains_key(&kmer) {
-                //    shared_kmers += 1;
-                //}
             }
         }
-
-        // ! Memory calc - Do this again with "queue" or "smallvec"
-        // let test_vec = vec![0u64; max_tax_bit_index];
-        // println!("Vec: {:?}", test_vec);
-        // println!("Size: {}", std::mem::size_of_val(&test_vec));
-        // for i in test_vec {
-        //     println!("\tentry size: {:?}", std::mem::size_of_val(&i));
-        // }
-
-        // println!(
-        //     "kmers pr read: {}",
-        //     db_kmer_count as f64 / db_read_count as f64
-        // );
-
-        // println!(
-        //     "capacity pr read: {}",
-        //     db_cap_count as f64 / db_read_count as f64
-        // );
-
-        // TODO: Delete old code
-        // let dummy: () = records.map(|record| {
-        //     get_unique_kmers(record.unwrap().seq(), k, &max_kmer_bit, &kmer_overflow_bits)
-        //         .iter()
-        //         .map(|kmer| {
-        //             db.entry(*kmer)
-        //                 .and_modify(|taxids| taxids.extend([metadata.ncbi_taxid]))
-        //                 .or_insert(AHashSet::from([metadata.ncbi_taxid]));
-        //         });
-        // });
-
-        // for kmer_set in kmer_sets {
-        //     for kmer in kmer_set {
-        //         db.entry(kmer)
-        //             .and_modify(|taxids| taxids.extend([metadata.ncbi_taxid]))
-        //             .or_insert(AHashSet::from([metadata.ncbi_taxid]));
-        //     }
-        // }
     }
 
-    // TODO MEM debug
-
-    // TODO remove debug print
-    // println!("DB size end:\t{:?}", std::mem::size_of_val(&db));
-    // for (kmer, tax_vec) in &db {
-    //     println!("{:?}\t{:?}", kmer, tax_vec);
-    //     println!("Size of vec:\t{:?}", std::mem::size_of_val(tax_vec));
-    //     println!("Size of key:\t{:?}", std::mem::size_of_val(kmer));
-    //     let one: Vec<u8> = vec![0u8; 1];
-    //     println!("Size vec size 1:\t{:?}", std::mem::size_of_val(&one));
-    //     let empty: Vec<u8> = vec![0u8; 0];
-    //     println!("Size empty vec:\t{:?}", std::mem::size_of_val(&empty));
-
-    //     let test_ar: [u64; 4] = [0u64; 4];
-    //     let mut test_box: Box<[u64; 4]> = Box::new([0u64; 4]);
-    //     test_box[0] = 12u64;
-    //     test_box[1] = 122u64;
-    //     test_box[2] = 12332u64;
-    //     test_box[3] = 1234322u64;
-    //     println!("Size of ar:\t{:?}", std::mem::size_of_val(&test_ar));
-    //     println!("Size of box:\t{:?}", std::mem::size_of_val(&test_box));
-    //     break;
-    // }
-    // println!("Shared kmers: {}", &shared_kmers);
-
-    // TODO: Uncomment index write
     serialize_compress_write(output, &db);
-
     println!("Number of kmers: {}", db.len());
 }
 
 fn annotate_kmer_with_tax(db: &mut AHashMap<usize, Vec<u8>>, kmer: usize, tax_index: usize) {
-    match db.get_mut(&kmer) {
+    match db.get(&kmer) {
         Some(tax_vec) => {
             let new_tax_vec = insert_index_into_tax_vec(&tax_vec, tax_index);
             db.insert(kmer, new_tax_vec);
@@ -682,6 +523,14 @@ fn insert_index_into_tax_vec(tax_vec: &Vec<u8>, tax_index: usize) -> Vec<u8> {
             if index_counter > tax_index {
                 new_tax_vec[new_tax_vec_i] =
                     insert_index_tax_bit_in_byte(index_counter, tax_index, tax_entry);
+                new_tax_vec_i += 1;
+                tax_vec_offset += 1;
+                copy_values_between_vectors(
+                    i + tax_vec_offset,
+                    &tax_vec,
+                    new_tax_vec_i,
+                    &mut new_tax_vec,
+                );
                 break;
             }
         }
@@ -737,79 +586,6 @@ fn insert_zeroes_in_tax_vec(
         let entry_byte: u8 = 1 << remaining_zeroes;
         insert_or_push_to_vec(new_tax_vec, *new_tax_vec_i, entry_byte);
     }
-}
-
-fn insert_post_zeroes_in_tax_vec(
-    post_zeroes_val: usize,
-    dest_vec: &mut Vec<u8>,
-    dest_vec_i: &mut usize, // Index of the newest value inserted.
-    src_vec: &Vec<u8>,
-    src_vec_i: &mut usize, // Index of the next value from tax_vec to insert.
-) {
-    const BYTE_SIZE: usize = 8;
-    let mut post_zeroes = post_zeroes_val;
-
-    while post_zeroes != 0 {
-        // If value in tax_vec is a zero byte
-        // if src_vec[*src_vec_i] == 0 {
-        //     *src_vec_i += 1;
-        //     let zero_count = src_vec[*src_vec_i] as usize;
-        //     *src_vec_i += 1;
-        //     //post_zeroes += zero_count + BYTE_SIZE;
-        // }
-
-        if post_zeroes >= 263 {
-            *dest_vec_i += 1;
-            insert_or_push_to_vec(dest_vec, *dest_vec_i, 0);
-            *dest_vec_i += 1;
-            insert_or_push_to_vec(dest_vec, *dest_vec_i, 255);
-            post_zeroes -= 263;
-        } else {
-            if post_zeroes >= BYTE_SIZE {
-                let zero_count = ((post_zeroes - BYTE_SIZE) / 8) * 8;
-                insert_or_push_to_vec(dest_vec, *dest_vec_i, 0);
-                *dest_vec_i += 1;
-                insert_or_push_to_vec(dest_vec, *dest_vec_i, zero_count as u8);
-                *dest_vec_i += 1;
-                post_zeroes = post_zeroes - zero_count - BYTE_SIZE;
-            }
-
-            let entry_byte: u8 = 1 << post_zeroes;
-            insert_or_push_to_vec(dest_vec, *dest_vec_i, entry_byte);
-            post_zeroes = 0;
-        }
-    }
-}
-
-fn insert_pre_zeroes_in_tax_vec(
-    pre_zeroes: usize,
-    new_tax_vec: &mut Vec<u8>,
-    new_tax_vec_i: &mut usize,
-) {
-    const BYTE_SIZE: usize = 8;
-    let mut rest = pre_zeroes;
-    // ! Only for tax index > index counter
-    // Inserts 0, 255 pairs
-    // let zero_chunk_count = rest / 263;
-    // for _ in 0..zero_chunk_count {
-    //     new_tax_vec.push(0);
-    //     new_tax_vec.push(255);
-    // }
-    // rest -= zero_chunk_count * 263;
-
-    // Insert zero count < 255
-    if rest >= BYTE_SIZE {
-        let zero_count = ((rest - BYTE_SIZE) / 8) * 8;
-        insert_or_push_to_vec(new_tax_vec, *new_tax_vec_i, 0);
-        *new_tax_vec_i += 1;
-        insert_or_push_to_vec(new_tax_vec, *new_tax_vec_i, zero_count as u8);
-        *new_tax_vec_i += 1;
-        rest = rest - zero_count - BYTE_SIZE;
-    }
-
-    // Create and push the final byte
-    let entry_byte: u8 = 1 << rest;
-    insert_or_push_to_vec(new_tax_vec, *new_tax_vec_i, entry_byte);
 }
 
 fn new_tax_vec(tax_index: usize) -> Vec<u8> {
@@ -898,25 +674,6 @@ fn get_tax_index(meta_entry: &MetaEntry, tax_groups: &Vec<String>) -> usize {
 
     match tax_index {
         Some((index, _)) => index,
-        None => unreachable!(),
-    }
-}
-
-fn get_tax_8bit_index(meta_entry: &MetaEntry, tax_groups: &Vec<String>) -> (usize, usize) {
-    let tax_index = tax_groups
-        .iter()
-        .find_position(|tax| *tax == &meta_entry.gtdb_tax);
-
-    match tax_index {
-        Some((index, _)) => {
-            // let sub_index = index % 64;
-            let sub_index = index % 8; //  ! REMEMBER TO SET BIT SIZE
-
-            // let bit_index = (index - sub_index) / 64;
-            let bit_index = (index - sub_index) / 8; //  ! REMEMBER TO SET BIT SIZE
-
-            return (bit_index, sub_index);
-        }
         None => unreachable!(),
     }
 }
@@ -1277,6 +1034,7 @@ mod test {
         let tax_index_ex3 = 4;
         let tax_index_ex4 = 15;
         let tax_index_ex5 = 530;
+        let tax_index_ex6 = 13;
 
         let tax_vec_ex1 = new_tax_vec(tax_index_ex1);
         assert_eq!(tax_vec_ex1, [0, 255, 0, 120, 64]);
@@ -1292,6 +1050,9 @@ mod test {
 
         let tax_vec_ex5 = new_tax_vec(tax_index_ex5);
         assert_eq!(tax_vec_ex5, [0, 255, 0, 255, 16]);
+
+        let tax_vec_ex6 = new_tax_vec(tax_index_ex6);
+        assert_eq!(tax_vec_ex6, [0, 0, 32]);
     }
 
     #[test]
@@ -1320,76 +1081,36 @@ mod test {
     }
 
     #[test]
-    fn test_insert_pre_zeroes_in_tax_vec() {
+    fn test_insert_zeroes_in_tax_vec() {
         let mut tax_vec_1 = vec![1, 2];
         let mut tax_vec_i_1 = 2;
-        insert_pre_zeroes_in_tax_vec(170, &mut tax_vec_1, &mut tax_vec_i_1);
+        insert_zeroes_in_tax_vec(170, &mut tax_vec_1, &mut tax_vec_i_1, true);
         assert_eq!(tax_vec_1, [1, 2, 0, 160, 4]);
 
         let mut tax_vec_2 = vec![1, 2];
         let mut tax_vec_i_2 = 2;
-        insert_pre_zeroes_in_tax_vec(6, &mut tax_vec_2, &mut tax_vec_i_2);
+        insert_zeroes_in_tax_vec(6, &mut tax_vec_2, &mut tax_vec_i_2, true);
         assert_eq!(tax_vec_2, [1, 2, 64]);
 
         let mut tax_vec_3 = vec![0, 255, 0, 120, 0];
         let mut tax_vec_i_3 = 2;
-        insert_pre_zeroes_in_tax_vec(25, &mut tax_vec_3, &mut tax_vec_i_3);
+        insert_zeroes_in_tax_vec(25, &mut tax_vec_3, &mut tax_vec_i_3, true);
         assert_eq!(tax_vec_3, [0, 255, 0, 16, 2]);
-    }
 
-    #[test]
-    fn test_insert_post_zeroes_in_tax_vec() {
-        let src_vec_1 = vec![2, 3, 0, 255, 0, 255, 0, 247, 64];
         let mut dest_vec_1 = vec![2, 3, 0, 0];
-        let mut src_vec_i_1 = 2;
         let mut dest_vec_i_1 = 2;
-        insert_post_zeroes_in_tax_vec(
-            40,
-            &mut dest_vec_1,
-            &mut dest_vec_i_1,
-            &src_vec_1,
-            &mut src_vec_i_1,
-        );
-        assert_eq!(dest_vec_1, [2, 3, 0, 32, 1]);
+        insert_zeroes_in_tax_vec(40, &mut dest_vec_1, &mut dest_vec_i_1, false);
+        assert_eq!(dest_vec_1, [2, 3, 0, 32]);
 
-        let src_vec_2 = vec![2, 3, 0, 255, 64];
-        let mut dest_vec_2 = vec![2, 3, 0, 0];
-        let mut src_vec_i_2 = 2;
-        let mut dest_vec_i_2 = 2;
-        insert_post_zeroes_in_tax_vec(
-            40,
-            &mut dest_vec_2,
-            &mut dest_vec_i_2,
-            &src_vec_2,
-            &mut src_vec_i_2,
-        );
-        assert_eq!(dest_vec_2, [2, 3, 0, 32, 1]);
-
-        let src_vec_3 = vec![2, 3, 64];
         let mut dest_vec_3 = vec![2, 3];
-        let mut src_vec_i_3 = 2;
         let mut dest_vec_i_3 = 1;
-        insert_post_zeroes_in_tax_vec(
-            0,
-            &mut dest_vec_3,
-            &mut dest_vec_i_3,
-            &src_vec_3,
-            &mut src_vec_i_3,
-        );
+        insert_zeroes_in_tax_vec(0, &mut dest_vec_3, &mut dest_vec_i_3, false);
         assert_eq!(dest_vec_3, [2, 3]);
 
-        let src_vec_4 = vec![0, 255, 0, 120, 64];
         let mut dest_vec_4 = vec![0, 255, 0, 16, 2];
-        let mut src_vec_i_4 = 2;
         let mut dest_vec_i_4 = 5;
-        insert_post_zeroes_in_tax_vec(
-            95,
-            &mut dest_vec_4,
-            &mut dest_vec_i_4,
-            &src_vec_4,
-            &mut src_vec_i_4,
-        );
-        assert_eq!(dest_vec_4, [0, 255, 0, 16, 2, 0, 80, 128]);
+        insert_zeroes_in_tax_vec(88, &mut dest_vec_4, &mut dest_vec_i_4, false);
+        assert_eq!(dest_vec_4, [0, 255, 0, 16, 2, 0, 80]);
     }
 
     #[test]
@@ -1436,6 +1157,9 @@ mod test {
          * [0, 255, 0, 120, 64] -> 397
          * [0, 255, 0, 120, 64, 0, 255, 0, 48, 4] -> 397, 720
          *
+         * 8. Insert index 5 into tax_vec with index 5, 11, 22, 30 annotated.
+         * [32, 8, 128, 64] -> 5, 11, 22, 30
+         *
          */
 
         let tax_vec_1: Vec<u8> = vec![0, 255, 0, 120, 64];
@@ -1465,6 +1189,10 @@ mod test {
         let tax_vec_7: Vec<u8> = vec![0, 255, 0, 120, 64];
         let tax_vec_new_7 = insert_index_into_tax_vec(&tax_vec_7, 720);
         assert_eq!(tax_vec_new_7, [0, 255, 0, 120, 64, 0, 255, 0, 48, 4]);
+
+        let tax_vec_8: Vec<u8> = vec![32, 8, 128, 64];
+        let tax_vec_new_8 = insert_index_into_tax_vec(&tax_vec_8, 5);
+        assert_eq!(tax_vec_new_8, [32, 8, 128, 64]);
     }
 
     #[test]
@@ -1475,7 +1203,7 @@ mod test {
         let mut tax_output_3: Vec<usize> = vec![];
         let entry_1 = 0b_0000_0000; // 0
         let entry_2 = 0b_0000_0001; // 1
-        let entry_3 = 0b_0100_1001; // 64 + 16 + 1 = 81
+        let entry_3 = 0b_0100_1001; // 1, 4, 7
 
         push_tax_from_bit_vec_to_tax_vec(entry_1, tax_index_count, &mut tax_output_1);
         assert_eq!(tax_output_1, []);
