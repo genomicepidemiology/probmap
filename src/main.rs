@@ -143,7 +143,7 @@ fn main() {
         }) => {
             let mut file = File::open(&template).unwrap();
             let mut file_decomp_input = brotli::Decompressor::new(&mut file, 4096);
-            let db: AHashMap<usize, Vec<u64>> =
+            let db: AHashMap<usize, Vec<u8>> =
                 bincode::deserialize_from(&mut file_decomp_input).unwrap();
 
             let mut tax_filename = template.file_name().unwrap().to_owned();
@@ -204,7 +204,7 @@ fn get_unique_tax_groups(metadata_map: &AHashMap<String, MetaEntry>) -> Vec<Stri
 
 fn calc_prob_from_input(
     k: &usize,
-    db: &AHashMap<usize, Vec<u64>>,
+    db: &AHashMap<usize, Vec<u8>>,
     input: &Vec<PathBuf>,
     tax_groups: &Vec<String>,
 ) -> Result<(), std::io::Error> {
@@ -295,12 +295,12 @@ fn calc_prob_from_input(
 
 fn annotate_kmers(
     kmers: &Vec<usize>,
-    db: &AHashMap<usize, Vec<u64>>,
+    db: &AHashMap<usize, Vec<u8>>,
     prior: f64,
     tax_groups_length: usize,
 ) -> Vec<f64> {
     // index 0 in sample counts are unkown kmers.
-    // Indexes >1 are species from species vec.
+    // Indexes >=1 are species from species vec.
     let mut sample_counts: Vec<usize> = vec![0; tax_groups_length + 1];
 
     // TODO debug var
@@ -309,23 +309,17 @@ fn annotate_kmers(
 
     for kmer in kmers {
         match db.get(kmer) {
-            Some(species_list) => {
+            Some(tax_bit_encoded_list) => {
                 // TODO debug
                 if debug == true {
-                    println!("Species list: {:?}", species_list);
+                    println!("tax_bit_encoded_list list: {:?}", tax_bit_encoded_list);
                 }
-
-                for (int_index, species_int) in species_list.iter().enumerate() {
-                    let mut bit_index = 0;
-                    let mut cache: u64 = species_int.clone(); // Guess ints are copied so no need to clone
-                    while cache != 0 {
-                        // Uneven cache == 1. Uneven cache -> rightmost bit is 1
-                        if (cache & 1) == 1 {
-                            sample_counts[int_index + bit_index + 1] += 1;
-                        }
-                        cache >>= 1;
-                        bit_index += 1;
-                    }
+                let tax_list = extract_tax_from_list(tax_bit_encoded_list);
+                for tax_index in &tax_list {
+                    sample_counts[tax_index + 1] += 1; // + 1 as 0 index is unknown.
+                }
+                if debug == true {
+                    println!("tax_list list: {:?}", tax_list);
                 }
             }
             None => {
@@ -335,31 +329,64 @@ fn annotate_kmers(
         // TODO debug var
         debug = false;
     }
-
-    // for kmer in kmers {
-    //     match db.get(kmer) {
-    //         Some(species_list) => {
-    //             for (int_index, species_int) in species_list.iter().enumerate() {
-    //                 let mut bit_index = 0;
-    //                 let mut cache: u64 = species_int.clone();
-    //                 while cache != 0 {
-    //                     cache >>= 1;
-    //                     if cache != *species_int {
-    //                         sample_counts[int_index + bit_index] += 1;
-    //                     }
-    //                     bit_index += 1;
-    //                 }
-    //             }
-    //         }
-    //         None => {
-    //             sample_counts[0] += 1;
-    //         }
-    //     }
-    // }
-
     // println!("Sample counts: {:?}", &sample_counts);
 
     calc_probs(&sample_counts, prior)
+}
+
+fn extract_tax_from_list(tax_list: &Vec<u8>) -> Vec<usize> {
+    const BYTE_SIZE: usize = 8;
+    let mut tax_index_count = 0;
+    let mut zero_count_switch = false;
+    let mut tax_output: Vec<usize> = vec![];
+
+    for tax_entry in tax_list {
+        match tax_entry {
+            0 => {
+                // Entry is 0 byte (not a zero counter)
+                if zero_count_switch == false {
+                    tax_index_count += BYTE_SIZE;
+                    zero_count_switch = true;
+                // Entry is a zero bit counter but it is zero
+                } else {
+                    zero_count_switch = false;
+                }
+            }
+            not_zero => {
+                // Entry is a zero bit counter and not zero
+                if zero_count_switch == true {
+                    tax_index_count += *not_zero as usize;
+                    zero_count_switch = false;
+                // Entry is a non-zero byte
+                } else {
+                    push_tax_from_bit_vec_to_tax_vec(*tax_entry, tax_index_count, &mut tax_output);
+                    tax_index_count += BYTE_SIZE;
+                }
+            }
+        }
+    }
+
+    tax_output
+}
+
+fn push_tax_from_bit_vec_to_tax_vec(
+    tax_entry: u8,
+    tax_index_count: usize,
+    tax_output: &mut Vec<usize>,
+) {
+    /*
+     * Outputs a list of zero-indexed tax.
+     */
+    let mut cache: u8 = tax_entry;
+    let mut bit_index = tax_index_count;
+    while cache != 0 {
+        // Uneven cache == 1. Uneven cache -> rightmost bit is 1
+        if (cache & 1) == 1 {
+            tax_output.push(bit_index);
+        }
+        cache >>= 1;
+        bit_index += 1;
+    }
 }
 
 fn calc_probs(sample_counts: &Vec<usize>, prior: f64) -> Vec<f64> {
@@ -411,7 +438,10 @@ fn create_db(
 
     for metadata in metadata_map.values() {
         // TODO: Not necessarry to find index for each file, only each species
-        let tax_8bit_index: (usize, usize) = get_tax_8bit_index(metadata, tax_groups);
+        // let tax_8bit_index: (usize, usize) = get_tax_8bit_index(metadata, tax_groups);
+
+        let tax_index: usize = get_tax_index(metadata, tax_groups);
+
         // let tax_8bit_index: (usize, usize) = get_tax_8bit_index(metadata, tax_groups);  //  ! REMEMBER TO SET BIT SIZE
         let mut file = fs::File::open(&metadata.path).unwrap(); // TODO std::io::Error
 
@@ -435,8 +465,11 @@ fn create_db(
             for kmer in kmers {
                 // db.entry(kmer).or_insert(vec![0u64; max_tax_bit_index])[tax_8bit_index.0] |=
                 //     1 << tax_8bit_index.1;
-                db.entry(kmer).or_insert(vec![0u8; max_tax_bit_index])[tax_8bit_index.0] |=  //  ! REMEMBER TO SET BIT SIZE
-                    1 << tax_8bit_index.1;
+
+                annotate_kmer_with_tax(&mut db, kmer, tax_index)
+
+                // db.entry(kmer).or_insert(vec![0u8; max_tax_bit_index])[tax_8bit_index.0] |=  //  ! REMEMBER TO SET BIT SIZE
+                //    1 << tax_8bit_index.1;
 
                 //if db.contains_key(&kmer) {
                 //    shared_kmers += 1;
@@ -513,6 +546,337 @@ fn create_db(
     println!("Number of kmers: {}", db.len());
 }
 
+fn annotate_kmer_with_tax(db: &mut AHashMap<usize, Vec<u8>>, kmer: usize, tax_index: usize) {
+    match db.get_mut(&kmer) {
+        Some(tax_vec) => {
+            let new_tax_vec = insert_index_into_tax_vec(&tax_vec, tax_index);
+            db.insert(kmer, new_tax_vec);
+        }
+        None => {
+            db.insert(kmer, new_tax_vec(tax_index));
+        }
+    }
+}
+
+fn insert_index_tax_bit_in_byte(index_max: usize, tax_index: usize, tax_byte: u8) -> u8 {
+    let index_diff = index_max - tax_index;
+    let zeroes = 8 - index_diff;
+    let new_byte = 1 << zeroes;
+    return tax_byte | new_byte;
+}
+
+fn copy_values_between_vectors(
+    src_index: usize,
+    src_vec: &Vec<u8>,
+    dest_index: usize,
+    dest_vec: &mut Vec<u8>,
+) {
+    /*
+     * Copies values from the given index of a source vector to destination
+     * vector with the destination index offset given.
+     * If destination vector is too short the last values will be pushed.
+     */
+    for i in 0..(src_vec.len() - src_index) {
+        if (dest_index + i) < dest_vec.len() {
+            dest_vec[dest_index + i] = src_vec[src_index + i];
+        } else {
+            dest_vec.push(src_vec[src_index + i])
+        }
+    }
+}
+
+fn insert_or_push_to_vec(vec: &mut Vec<u8>, index: usize, value: u8) {
+    if vec.len() > index {
+        vec[index] = value;
+    } else {
+        vec.push(value);
+    }
+}
+
+fn insert_index_into_tax_vec(tax_vec: &Vec<u8>, tax_index: usize) -> Vec<u8> {
+    const BYTE_SIZE: usize = 8;
+    let mut new_tax_vec: Vec<u8> = vec![0u8; tax_vec.len()];
+    let mut new_tax_vec_i: usize = 0;
+    let mut tax_vec_offset: usize = 0;
+    let mut index_counter: usize = 0;
+    let mut zero_count_switch = false;
+
+    for i in 0..tax_vec.len() {
+        let tax_entry = tax_vec[i + tax_vec_offset];
+        new_tax_vec[new_tax_vec_i] = tax_entry;
+
+        // Entry is 0 byte (not a zero counter)
+        if tax_entry == 0 && zero_count_switch == false {
+            index_counter += BYTE_SIZE;
+            zero_count_switch = true;
+
+            if index_counter > tax_index {
+                new_tax_vec[new_tax_vec_i] =
+                    insert_index_tax_bit_in_byte(index_counter, tax_index, 0);
+                new_tax_vec_i += 1;
+                // Zero byte followed by non-zero counter.
+                if tax_vec[i + tax_vec_offset + 1] != 0 {
+                    let new_count = tax_vec[i + tax_vec_offset + 1] - BYTE_SIZE as u8;
+                    insert_or_push_to_vec(&mut new_tax_vec, new_tax_vec_i, 0);
+                    new_tax_vec_i += 1;
+                    insert_or_push_to_vec(&mut new_tax_vec, new_tax_vec_i, new_count);
+
+                    tax_vec_offset += 2;
+                    new_tax_vec_i += 1;
+
+                    index_counter += BYTE_SIZE + new_count as usize;
+
+                // Zero byte followed by counter==0. As zero byte is no
+                // longer zero, the counter should be removed. Done by
+                // skipping the index.
+                } else {
+                    tax_vec_offset += 2;
+                    new_tax_vec.pop();
+                }
+                copy_values_between_vectors(
+                    i + tax_vec_offset,
+                    &tax_vec,
+                    new_tax_vec_i,
+                    &mut new_tax_vec,
+                );
+
+                break;
+            }
+
+        // Entry is a zero bit counter but it is zero
+        } else if tax_entry == 0 && zero_count_switch == true {
+            zero_count_switch = false;
+
+        // Entry is a zero bit counter and not zero
+        } else if zero_count_switch == true {
+            index_counter += tax_entry as usize;
+            zero_count_switch = false;
+
+            if index_counter > tax_index {
+                let post_zeroes = index_counter - tax_index - BYTE_SIZE + 1;
+                let pre_zeroes = (tax_index - (index_counter - tax_entry as usize)) + BYTE_SIZE;
+
+                // Prev index to counter is always a zero byte.
+                new_tax_vec_i -= 1;
+
+                // Insert zeroes before index byte and index byte
+                insert_zeroes_in_tax_vec(pre_zeroes, &mut new_tax_vec, &mut new_tax_vec_i, true);
+                new_tax_vec_i += 1;
+                tax_vec_offset += 1;
+                // Insert zeroes after index byte
+                insert_zeroes_in_tax_vec(post_zeroes, &mut new_tax_vec, &mut new_tax_vec_i, false);
+
+                copy_values_between_vectors(
+                    i + tax_vec_offset,
+                    &tax_vec,
+                    new_tax_vec_i,
+                    &mut new_tax_vec,
+                );
+
+                break;
+            }
+
+        // Entry is a non-zero byte
+        } else {
+            index_counter += BYTE_SIZE;
+            if index_counter > tax_index {
+                new_tax_vec[new_tax_vec_i] =
+                    insert_index_tax_bit_in_byte(index_counter, tax_index, tax_entry);
+                break;
+            }
+        }
+
+        new_tax_vec_i += 1;
+    }
+
+    // Index to insert is larger than the largest existing index
+    if tax_index > index_counter {
+        let mut rest = tax_index - index_counter;
+
+        // Inserts 0, 255 pairs
+        let zero_chunk_count = rest / 263;
+        for _ in 0..zero_chunk_count {
+            new_tax_vec.push(0);
+            new_tax_vec.push(255);
+        }
+
+        // Insert zero count < 255
+        rest -= zero_chunk_count * 263;
+        let mut tax_vec_i = new_tax_vec.len();
+        insert_zeroes_in_tax_vec(rest, &mut new_tax_vec, &mut tax_vec_i, true);
+    }
+
+    new_tax_vec
+}
+
+fn insert_zeroes_in_tax_vec(
+    zeroes: usize,
+    new_tax_vec: &mut Vec<u8>,
+    new_tax_vec_i: &mut usize,
+    include_index_byte: bool,
+) {
+    /*
+     * zeroes must be <= 263
+     * if include_index_byte is false then zeroes % 8 == 0 must be true.
+     */
+
+    const BYTE_SIZE: usize = 8;
+    let mut remaining_zeroes = zeroes;
+
+    if remaining_zeroes >= BYTE_SIZE {
+        let zero_count = ((remaining_zeroes - BYTE_SIZE) / 8) * 8;
+        insert_or_push_to_vec(new_tax_vec, *new_tax_vec_i, 0);
+        *new_tax_vec_i += 1;
+        insert_or_push_to_vec(new_tax_vec, *new_tax_vec_i, zero_count as u8);
+        *new_tax_vec_i += 1;
+        remaining_zeroes = remaining_zeroes - zero_count - BYTE_SIZE;
+    }
+
+    if include_index_byte {
+        // Create and insert/push the final byte
+        let entry_byte: u8 = 1 << remaining_zeroes;
+        insert_or_push_to_vec(new_tax_vec, *new_tax_vec_i, entry_byte);
+    }
+}
+
+fn insert_post_zeroes_in_tax_vec(
+    post_zeroes_val: usize,
+    dest_vec: &mut Vec<u8>,
+    dest_vec_i: &mut usize, // Index of the newest value inserted.
+    src_vec: &Vec<u8>,
+    src_vec_i: &mut usize, // Index of the next value from tax_vec to insert.
+) {
+    const BYTE_SIZE: usize = 8;
+    let mut post_zeroes = post_zeroes_val;
+
+    while post_zeroes != 0 {
+        // If value in tax_vec is a zero byte
+        // if src_vec[*src_vec_i] == 0 {
+        //     *src_vec_i += 1;
+        //     let zero_count = src_vec[*src_vec_i] as usize;
+        //     *src_vec_i += 1;
+        //     //post_zeroes += zero_count + BYTE_SIZE;
+        // }
+
+        if post_zeroes >= 263 {
+            *dest_vec_i += 1;
+            insert_or_push_to_vec(dest_vec, *dest_vec_i, 0);
+            *dest_vec_i += 1;
+            insert_or_push_to_vec(dest_vec, *dest_vec_i, 255);
+            post_zeroes -= 263;
+        } else {
+            if post_zeroes >= BYTE_SIZE {
+                let zero_count = ((post_zeroes - BYTE_SIZE) / 8) * 8;
+                insert_or_push_to_vec(dest_vec, *dest_vec_i, 0);
+                *dest_vec_i += 1;
+                insert_or_push_to_vec(dest_vec, *dest_vec_i, zero_count as u8);
+                *dest_vec_i += 1;
+                post_zeroes = post_zeroes - zero_count - BYTE_SIZE;
+            }
+
+            let entry_byte: u8 = 1 << post_zeroes;
+            insert_or_push_to_vec(dest_vec, *dest_vec_i, entry_byte);
+            post_zeroes = 0;
+        }
+    }
+}
+
+fn insert_pre_zeroes_in_tax_vec(
+    pre_zeroes: usize,
+    new_tax_vec: &mut Vec<u8>,
+    new_tax_vec_i: &mut usize,
+) {
+    const BYTE_SIZE: usize = 8;
+    let mut rest = pre_zeroes;
+    // ! Only for tax index > index counter
+    // Inserts 0, 255 pairs
+    // let zero_chunk_count = rest / 263;
+    // for _ in 0..zero_chunk_count {
+    //     new_tax_vec.push(0);
+    //     new_tax_vec.push(255);
+    // }
+    // rest -= zero_chunk_count * 263;
+
+    // Insert zero count < 255
+    if rest >= BYTE_SIZE {
+        let zero_count = ((rest - BYTE_SIZE) / 8) * 8;
+        insert_or_push_to_vec(new_tax_vec, *new_tax_vec_i, 0);
+        *new_tax_vec_i += 1;
+        insert_or_push_to_vec(new_tax_vec, *new_tax_vec_i, zero_count as u8);
+        *new_tax_vec_i += 1;
+        rest = rest - zero_count - BYTE_SIZE;
+    }
+
+    // Create and push the final byte
+    let entry_byte: u8 = 1 << rest;
+    insert_or_push_to_vec(new_tax_vec, *new_tax_vec_i, entry_byte);
+}
+
+fn new_tax_vec(tax_index: usize) -> Vec<u8> {
+    const BYTE_SIZE: usize = 8;
+    // Create a tax vector with no annotated tax up till the provided
+    // tax index.
+    // This means first entry is zero, given the provided tax is >7.
+    // The following entries then describes non-annotated indices in
+    // chunks of maximum 255 + 8 = 263.
+
+    // After a zero will ALWAYS follow the number of next zeroes until
+    // next annotated index. This number can be zero itself.
+
+    // 0000 0000, 0000 0000, 1000 0000 = 0, 0, 128       => 15
+    // 0000 0000, 0000 0000, 1000 0010 = 0, 0, 130       => 9, 15
+    // 0000 0010, 1000 0010 = 2, 130 => 1, 9, 15
+
+    // ex1: 1, ex2: 1, ex3: 0, ex4: 0
+    let zero_vec_count = (tax_index as f32 / 263_f32).floor() as usize;
+    // ex1: 135, ex2: 7, ex3: 4, ex4: 15
+    let zeroes_left = tax_index - zero_vec_count * 263;
+    // ex1: 128, ex2: 0, ex3: 0, ex4: 8
+    let zero_count = (zeroes_left / BYTE_SIZE) * BYTE_SIZE;
+    let zero_count_vec_size: usize;
+    if zero_count > 0 {
+        zero_count_vec_size = 2;
+    } else {
+        zero_count_vec_size = 0;
+    }
+    // ex1: 7, ex2: 7, ex3: 4, ex4: 7
+    let zero_bits = zeroes_left - zero_count;
+    // ex1: 5, ex2: 3, ex3: 1, ex4: 3
+    let mut tax_vec = vec![0u8; zero_vec_count * 2 + zero_count_vec_size + 1];
+
+    // ex1: [0, 255, 0, 0, 0]
+    // ex2: [0, 255, 0]
+    // ex3: [0]
+    // ex4: [0, 0, 0]
+    let zero_count_index = zero_vec_count * 2;
+    for i in (0..zero_count_index).step_by(2) {
+        tax_vec[i] = 0;
+        tax_vec[i + 1] = 255;
+    }
+
+    // ex1: [0, 255, 0, 120, 0]
+    // ex2: [0, 255, 0]
+    // ex3: [0]
+    // ex4: [0, 0, 0]
+    let last_byte_index;
+    if zero_count > 8 {
+        tax_vec[zero_count_index] = 0;
+        tax_vec[zero_count_index + 1] = (zero_count - 8) as u8;
+        last_byte_index = zero_count_index + 2;
+    } else if zero_count == 8 {
+        tax_vec[zero_count_index] = 0;
+        tax_vec[zero_count_index + 1] = 0;
+        last_byte_index = zero_count_index + 2;
+    } else {
+        last_byte_index = zero_count_index;
+    }
+
+    let last_byte: u8 = 1 << zero_bits;
+    tax_vec[last_byte_index] = last_byte;
+
+    tax_vec
+}
+
 fn serialize_compress_write<T>(output: &PathBuf, object: &T)
 where
     T: Serialize,
@@ -525,6 +889,17 @@ where
         20 as u32, // lg_window_size
     );
     bincode::serialize_into(&mut comp, object);
+}
+
+fn get_tax_index(meta_entry: &MetaEntry, tax_groups: &Vec<String>) -> usize {
+    let tax_index = tax_groups
+        .iter()
+        .find_position(|tax| *tax == &meta_entry.gtdb_tax);
+
+    match tax_index {
+        Some((index, _)) => index,
+        None => unreachable!(),
+    }
 }
 
 fn get_tax_8bit_index(meta_entry: &MetaEntry, tax_groups: &Vec<String>) -> (usize, usize) {
@@ -652,9 +1027,6 @@ fn get_unique_kmers(
     let mut kmer: usize = 0;
     let mut ignore_count = 0;
 
-    // TODO remove debug print
-    // println!("Seq size: {:?}", nuc_string.len());
-
     for (nuc_string_index, nuc) in nuc_string.iter().enumerate() {
         kmer <<= 2;
 
@@ -674,7 +1046,7 @@ fn get_unique_kmers(
             continue;
         }
 
-        if nuc_string_index >= *k {
+        if nuc_string_index >= *k - 1 {
             let kmer_rev_comp = rev_comp(kmer, *kmer_overflow_bits, *k);
             if kmer <= kmer_rev_comp {
                 kmer_set.insert(kmer);
@@ -785,6 +1157,8 @@ fn get_gtdb_taxonomy(tax_record: &String, tax_level: char) -> String {
 
 #[cfg(test)]
 mod test {
+    use itertools::enumerate;
+
     use crate::*;
 
     #[test]
@@ -866,12 +1240,313 @@ mod test {
 
         let kmer_set = get_unique_kmers(nuc_string, &k, &max_kmer_bit, &kmer_overflow_bits);
 
+        assert_eq!(kmer_set.len(), 3);
         assert_eq!(kmer_set.contains(&126), true);
         assert_eq!(kmer_set.contains(&66), true);
         assert_eq!(kmer_set.contains(&528), true);
         assert_eq!(kmer_set.contains(&507), false);
         assert_eq!(kmer_set.contains(&1005), false);
         assert_eq!(kmer_set.contains(&999999), false);
-        assert_eq!(kmer_set.len(), 3);
+    }
+
+    #[test]
+    fn test_new_tax_vec() {
+        /*
+         * Example 1: [0, 255, 0, 120, 64]
+         * Would annotate tax a index 263 + 8 + 120 + 7 - 1 = 397
+         * Above 64 = 0100 0000
+         *
+         * Example 2: [0, 255, 128] = 263 + 8 - 1 = 270
+         * 128 = 1000 0000
+         *
+         * Example 3: [16] = b00010000 => 4
+         *
+         * Example 4: [0, 0, 128] = 8 + 0 + 8 - 1 = 15
+         *
+         * Example 5: [0, 255, 0, 255, 32] = 263 + 263 + 5 - 1 = 530
+         * 16 = 0001 0000
+         */
+
+        let tax_index_ex1 = 397;
+        let tax_index_ex2 = 270;
+        let tax_index_ex3 = 4;
+        let tax_index_ex4 = 15;
+        let tax_index_ex5 = 530;
+
+        let tax_vec_ex1 = new_tax_vec(tax_index_ex1);
+        assert_eq!(tax_vec_ex1, [0, 255, 0, 120, 64]);
+
+        let tax_vec_ex2 = new_tax_vec(tax_index_ex2);
+        assert_eq!(tax_vec_ex2, [0, 255, 128]);
+
+        let tax_vec_ex3 = new_tax_vec(tax_index_ex3);
+        assert_eq!(tax_vec_ex3, [16]);
+
+        let tax_vec_ex4 = new_tax_vec(tax_index_ex4);
+        assert_eq!(tax_vec_ex4, [0, 0, 128]);
+
+        let tax_vec_ex5 = new_tax_vec(tax_index_ex5);
+        assert_eq!(tax_vec_ex5, [0, 255, 0, 255, 16]);
+    }
+
+    #[test]
+    fn test_insert_or_push_to_vec() {
+        let mut test_vec = vec![0u8; 3];
+
+        insert_or_push_to_vec(&mut test_vec, 1, 112);
+        assert_eq!(test_vec, [0, 112, 0]);
+
+        insert_or_push_to_vec(&mut test_vec, 3, 27);
+        assert_eq!(test_vec, [0, 112, 0, 27]);
+
+        // TODO This should be made to fail somehow.
+        insert_or_push_to_vec(&mut test_vec, 20, 20);
+        assert_eq!(test_vec, [0, 112, 0, 27, 20]);
+    }
+
+    #[test]
+    fn test_copy_values_between_vectors() {
+        let src_vec: Vec<u8> = vec![0, 0, 10, 4, 5, 6, 7, 8];
+        let mut dest_vec: Vec<u8> = vec![3, 4, 5, 6];
+        let src_index = 3;
+        let dest_index = 1;
+        copy_values_between_vectors(src_index, &src_vec, dest_index, &mut dest_vec);
+        assert_eq!(dest_vec, [3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_insert_pre_zeroes_in_tax_vec() {
+        let mut tax_vec_1 = vec![1, 2];
+        let mut tax_vec_i_1 = 2;
+        insert_pre_zeroes_in_tax_vec(170, &mut tax_vec_1, &mut tax_vec_i_1);
+        assert_eq!(tax_vec_1, [1, 2, 0, 160, 4]);
+
+        let mut tax_vec_2 = vec![1, 2];
+        let mut tax_vec_i_2 = 2;
+        insert_pre_zeroes_in_tax_vec(6, &mut tax_vec_2, &mut tax_vec_i_2);
+        assert_eq!(tax_vec_2, [1, 2, 64]);
+
+        let mut tax_vec_3 = vec![0, 255, 0, 120, 0];
+        let mut tax_vec_i_3 = 2;
+        insert_pre_zeroes_in_tax_vec(25, &mut tax_vec_3, &mut tax_vec_i_3);
+        assert_eq!(tax_vec_3, [0, 255, 0, 16, 2]);
+    }
+
+    #[test]
+    fn test_insert_post_zeroes_in_tax_vec() {
+        let src_vec_1 = vec![2, 3, 0, 255, 0, 255, 0, 247, 64];
+        let mut dest_vec_1 = vec![2, 3, 0, 0];
+        let mut src_vec_i_1 = 2;
+        let mut dest_vec_i_1 = 2;
+        insert_post_zeroes_in_tax_vec(
+            40,
+            &mut dest_vec_1,
+            &mut dest_vec_i_1,
+            &src_vec_1,
+            &mut src_vec_i_1,
+        );
+        assert_eq!(dest_vec_1, [2, 3, 0, 32, 1]);
+
+        let src_vec_2 = vec![2, 3, 0, 255, 64];
+        let mut dest_vec_2 = vec![2, 3, 0, 0];
+        let mut src_vec_i_2 = 2;
+        let mut dest_vec_i_2 = 2;
+        insert_post_zeroes_in_tax_vec(
+            40,
+            &mut dest_vec_2,
+            &mut dest_vec_i_2,
+            &src_vec_2,
+            &mut src_vec_i_2,
+        );
+        assert_eq!(dest_vec_2, [2, 3, 0, 32, 1]);
+
+        let src_vec_3 = vec![2, 3, 64];
+        let mut dest_vec_3 = vec![2, 3];
+        let mut src_vec_i_3 = 2;
+        let mut dest_vec_i_3 = 1;
+        insert_post_zeroes_in_tax_vec(
+            0,
+            &mut dest_vec_3,
+            &mut dest_vec_i_3,
+            &src_vec_3,
+            &mut src_vec_i_3,
+        );
+        assert_eq!(dest_vec_3, [2, 3]);
+
+        let src_vec_4 = vec![0, 255, 0, 120, 64];
+        let mut dest_vec_4 = vec![0, 255, 0, 16, 2];
+        let mut src_vec_i_4 = 2;
+        let mut dest_vec_i_4 = 5;
+        insert_post_zeroes_in_tax_vec(
+            95,
+            &mut dest_vec_4,
+            &mut dest_vec_i_4,
+            &src_vec_4,
+            &mut src_vec_i_4,
+        );
+        assert_eq!(dest_vec_4, [0, 255, 0, 16, 2, 0, 80, 128]);
+    }
+
+    #[test]
+    fn test_insert_index_into_tax_vec() {
+        /*
+         * Insertion cases:
+         * 1. Insertion into existing byte.
+         * 2. Insertion into zero byte followed by non-zero counter.
+         * 3. Insertion into counter more than 8 indeces away from zero byte.
+         * 4. Insertion into counter less than 8 indeces away from zero byte.
+         * 5. Insertion into zero byte followed by counter==0.
+         * 6. Insertion after greatest index.
+         *
+         * 1. Insert index 392 into tax_vec with index 397 annotated.
+         * [0, 255, 0, 120, 64] -> 263 + 8 + 120 + 7 - 1 -> 397
+         * 64 = 0100 0000 => 0100 0010 = 66
+         * [0, 255, 0, 120, 66] -> 392, 397
+         *
+         * 2. Insert index 265 into tax_vec with index 397 annotated.
+         * [0, 255, 0, 120, 64] -> 263 + 8 + 120 + 7 - 1 -> 397
+         * [0, 255, 4, 0, 112, 64] -> 265, 397
+         * 4 = 0000 0100
+         *
+         * 3. Insert index 288 into tax_vec with index 397 annotated.
+         * [0, 255, 0, 120, 64]
+         * [0, 255, 0, 16, 2, 0, 88, 64] -> 288, 397
+         *  263 + 128 = 391
+         *  391 - 288 = 103 = post_zeroes
+         *  288 - (255+8+8)
+         *
+         * 4. Insert index 272 into tax_vec with index 397 annotated.
+         * [0, 255, 0, 120, 64]
+         * [0, 255, 0, 0, 2, 0, 104, 64] -> 272, 397
+         *
+         * 5. Insert index 270 into tax_vec with index 272 annotated.
+         * [0, 255, 0, 0, 2] -> 272
+         * [0, 255, 128, 2] > 270, 272
+         *
+         * 6. Insert index 420 into tax_vec with index 397 annotated.
+         * [0, 255, 0, 120, 64] -> 397
+         * [0, 255, 0, 120, 64, 0, 8, 32] -> 397, 420
+         *
+         * 7. Insert index 720 into tax_vec with index 397 annotated.
+         * [0, 255, 0, 120, 64] -> 397
+         * [0, 255, 0, 120, 64, 0, 255, 0, 48, 4] -> 397, 720
+         *
+         */
+
+        let tax_vec_1: Vec<u8> = vec![0, 255, 0, 120, 64];
+        let tax_vec_new_1 = insert_index_into_tax_vec(&tax_vec_1, 392);
+        assert_eq!(tax_vec_new_1, [0, 255, 0, 120, 66]);
+
+        let tax_vec_2: Vec<u8> = vec![0, 255, 0, 120, 64];
+        let tax_vec_new_2 = insert_index_into_tax_vec(&tax_vec_2, 265);
+        assert_eq!(tax_vec_new_2, [0, 255, 4, 0, 112, 64]);
+
+        let tax_vec_3: Vec<u8> = vec![0, 255, 0, 120, 64];
+        let tax_vec_new_3 = insert_index_into_tax_vec(&tax_vec_3, 288);
+        assert_eq!(tax_vec_new_3, [0, 255, 0, 16, 2, 0, 88, 64]);
+
+        let tax_vec_4: Vec<u8> = vec![0, 255, 0, 120, 64];
+        let tax_vec_new_4 = insert_index_into_tax_vec(&tax_vec_4, 272);
+        assert_eq!(tax_vec_new_4, [0, 255, 0, 0, 2, 0, 104, 64]);
+
+        let tax_vec_5: Vec<u8> = vec![0, 255, 0, 0, 2];
+        let tax_vec_new_5 = insert_index_into_tax_vec(&tax_vec_5, 270);
+        assert_eq!(tax_vec_new_5, [0, 255, 128, 2]);
+
+        let tax_vec_6: Vec<u8> = vec![0, 255, 0, 120, 64];
+        let tax_vec_new_6 = insert_index_into_tax_vec(&tax_vec_6, 420);
+        assert_eq!(tax_vec_new_6, [0, 255, 0, 120, 64, 0, 8, 32]);
+
+        let tax_vec_7: Vec<u8> = vec![0, 255, 0, 120, 64];
+        let tax_vec_new_7 = insert_index_into_tax_vec(&tax_vec_7, 720);
+        assert_eq!(tax_vec_new_7, [0, 255, 0, 120, 64, 0, 255, 0, 48, 4]);
+    }
+
+    #[test]
+    fn test_push_tax_from_bit_vec_to_tax_vec() {
+        let tax_index_count = 100;
+        let mut tax_output_1: Vec<usize> = vec![];
+        let mut tax_output_2: Vec<usize> = vec![];
+        let mut tax_output_3: Vec<usize> = vec![];
+        let entry_1 = 0b_0000_0000; // 0
+        let entry_2 = 0b_0000_0001; // 1
+        let entry_3 = 0b_0100_1001; // 64 + 16 + 1 = 81
+
+        push_tax_from_bit_vec_to_tax_vec(entry_1, tax_index_count, &mut tax_output_1);
+        assert_eq!(tax_output_1, []);
+
+        push_tax_from_bit_vec_to_tax_vec(entry_2, tax_index_count, &mut tax_output_2);
+        assert_eq!(tax_output_2, [100]);
+
+        push_tax_from_bit_vec_to_tax_vec(entry_3, tax_index_count, &mut tax_output_3);
+        assert_eq!(tax_output_3, [100, 103, 106]);
+    }
+
+    #[test]
+    fn test_extract_tax_from_list() {
+        let tax_vec_1: Vec<u8> = vec![0, 255, 0, 120, 66];
+        let tax_list_1 = extract_tax_from_list(&tax_vec_1);
+        assert_eq!(tax_list_1, [392, 397]);
+
+        let tax_vec_2: Vec<u8> = vec![0, 255, 4, 0, 112, 64];
+        let tax_list_2 = extract_tax_from_list(&tax_vec_2);
+        assert_eq!(tax_list_2, [265, 397]);
+
+        let tax_vec_3: Vec<u8> = vec![0, 255, 0, 16, 2, 0, 88, 64];
+        let tax_list_3 = extract_tax_from_list(&tax_vec_3);
+        assert_eq!(tax_list_3, [288, 397]);
+
+        let tax_vec_4: Vec<u8> = vec![0, 255, 0, 0, 2, 0, 104, 64];
+        let tax_list_4 = extract_tax_from_list(&tax_vec_4);
+        assert_eq!(tax_list_4, [272, 397]);
+
+        let tax_vec_5: Vec<u8> = vec![0, 255, 128, 2];
+        let tax_list_5 = extract_tax_from_list(&tax_vec_5);
+        assert_eq!(tax_list_5, [270, 272]);
+
+        let tax_vec_6: Vec<u8> = vec![0, 255, 0, 120, 64, 0, 8, 32];
+        let tax_list_6 = extract_tax_from_list(&tax_vec_6);
+        assert_eq!(tax_list_6, [397, 420]);
+
+        let tax_vec_7: Vec<u8> = vec![0, 255, 0, 120, 64, 0, 255, 0, 48, 4];
+        let tax_list_7 = extract_tax_from_list(&tax_vec_7);
+        assert_eq!(tax_list_7, [397, 720]);
+    }
+
+    #[test]
+    fn test_calc_probs() {
+        let prior: f64 = 0.5;
+        let sample_counts: Vec<usize> = vec![0, 3, 0, 0, 4, 0];
+        let probs: Vec<f64> = calc_probs(&sample_counts, prior);
+        assert_eq!(probs, [0.05, 0.35, 0.05, 0.05, 0.45, 0.05]);
+    }
+
+    #[test]
+    fn test_annotate_kmers() {
+        let database: AHashMap<usize, Vec<u8>> = AHashMap::from([
+            (1000usize, vec![0, 255, 0, 120, 66]),          // 392, 397
+            (1001usize, vec![0, 255, 4, 0, 112, 64]),       // 265, 397
+            (1002usize, vec![0, 255, 0, 120, 66]),          // 392, 397
+            (1003usize, vec![0, 255, 0, 16, 2, 0, 88, 64]), // 288, 397
+        ]);
+        let kmers: Vec<usize> = vec![1000, 1003, 1002, 1000, 666];
+        let tax_groups_length = 399;
+        let prior: f64 = 0.1;
+
+        let annotated_kmers = annotate_kmers(&kmers, &database, prior, tax_groups_length);
+
+        let mut sample_counts: Vec<usize> = vec![0; 399 + 1];
+        // + 1 due to unkown category at index 0
+        sample_counts[392 + 1] = 3;
+        sample_counts[397 + 1] = 4;
+        sample_counts[288 + 1] = 1;
+        sample_counts[0] = 1;
+        let expected_result: Vec<f64> = calc_probs(&sample_counts, prior);
+
+        for (i, entry) in enumerate(annotated_kmers) {
+            let entry_mult = (entry * 1000f64).round();
+            let expect_mult = (expected_result[i] * 1000f64).round();
+            assert_eq!(entry_mult, expect_mult);
+        }
     }
 }
