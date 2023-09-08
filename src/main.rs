@@ -1,6 +1,5 @@
 // TODO: Not necessarry to find index for each file, only each species
 
-// use ahash::{AHashMap, AHashSet, HashMap, HashMapExt};
 use ahash::{AHashMap, AHashSet, HashMapExt};
 use bio::io::{
     fasta,
@@ -8,13 +7,17 @@ use bio::io::{
 };
 use std::{
     collections::HashMap,
+    error::Error,
     fs,
+    fs::File,
     hash::BuildHasherDefault,
     hash::Hash,
     io::BufReader,
     path::{Path, PathBuf},
+    sync::mpsc,
+    thread::{self, JoinHandle},
 };
-//use bio::io::fastq;
+
 use brotli::{CompressorReader, CompressorWriter};
 use clap::{builder::OsStr, Parser, Subcommand};
 use colored::*;
@@ -26,9 +29,6 @@ use nohash_hasher::NoHashHasher;
 use nohash_hasher::{BuildNoHashHasher, IntMap};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::error::Error;
-use std::fs::File;
-use std::io;
 
 const OUTPUT_EXT: &str = "prmap";
 
@@ -120,6 +120,14 @@ enum Commands {
                     compressed binary files."
         )]
         output: PathBuf,
+
+        #[arg(
+            short,
+            long,
+            value_name = "INT",
+            help = "Number of thread to spawn (max)."
+        )]
+        threads: usize,
     },
 }
 
@@ -157,6 +165,7 @@ fn main() {
             metadata,
             gtdb,
             output,
+            threads,
         }) => {
             println!("Get metadata");
             let metadata_map = match load_metadata(metadata, gtdb) {
@@ -174,7 +183,7 @@ fn main() {
             tax_group_file.set_file_name(derived_tax_filename);
             serialize_compress_write(&tax_group_file, &tax_groups);
 
-            create_db(&metadata_map, &kmersize, &tax_groups, &output);
+            create_db(&metadata_map, *kmersize, &tax_groups, &output, threads);
         }
         None => {}
     }
@@ -356,31 +365,84 @@ fn calc_probs(sample_counts: &Vec<usize>, prior: f64) -> Vec<f64> {
 
 fn create_db(
     metadata_map: &AHashMap<String, MetaEntry>,
-    k: &usize,
+    k: usize,
     tax_groups: &Vec<String>,
     output: &PathBuf,
+    nthreads: &usize,
 ) {
     let max_kmer_bit = max_bits(k * 2);
     let kmer_overflow_bits = usize::MAX - max_kmer_bit;
 
     let mut db: AHashMap<usize, Vec<u8>> = AHashMap::with_capacity(100_000_000);
 
-    for metadata in metadata_map.values() {
-        let tax_index: usize = get_tax_index(metadata, tax_groups);
+    let (sender, receiver) = mpsc::sync_channel::<(usize, AHashSet<usize>)>(1024);
+    let mut thread_handles: Vec<JoinHandle<()>> = vec![];
 
-        let mut file = fs::File::open(&metadata.path).unwrap(); // TODO std::io::Error
+    let worklists = split_tax_groups_into_chunks(nthreads, metadata_map);
 
-        let decoder = GzDecoder::new(&mut file);
-        let records = fasta::Reader::new(decoder).records();
+    for worklist in worklists {
+        let sender = sender.clone();
+        let tax_groups = tax_groups.clone();
 
-        for record in records {
-            let kmers: AHashSet<usize> =
-                get_unique_kmers(record.unwrap().seq(), k, &max_kmer_bit, &kmer_overflow_bits);
+        thread_handles.push(thread::spawn(move || {
+            for metadata in worklist {
+                let tax_index: usize = get_tax_index(&metadata, &tax_groups);
+                let file_path = metadata.path.clone();
 
-            for kmer in kmers {
-                annotate_kmer_with_tax(&mut db, kmer, tax_index)
+                let mut file = fs::File::open(&file_path).unwrap(); // TODO std::io::Error
+
+                let decoder = GzDecoder::new(&mut file);
+                let records = fasta::Reader::new(decoder).records();
+
+                let mut kmers: AHashSet<usize> = AHashSet::new();
+
+                for record in records {
+                    kmers.extend(get_unique_kmers(
+                        record.unwrap().seq(),
+                        &k,
+                        &max_kmer_bit,
+                        &kmer_overflow_bits,
+                    ));
+                }
+                sender.send((tax_index, kmers));
             }
+        }));
+    }
+
+    // for metadata in metadata_map.values() {
+    //     let sender = sender.clone();
+    //     let tax_index: usize = get_tax_index(metadata, tax_groups);
+    //     let file_path = metadata.path.clone();
+
+    //     thread_handles.push(thread::spawn(move || {
+    //         let mut file = fs::File::open(&file_path).unwrap(); // TODO std::io::Error
+
+    //         let decoder = GzDecoder::new(&mut file);
+    //         let records = fasta::Reader::new(decoder).records();
+
+    //         let mut kmers: AHashSet<usize> = AHashSet::new();
+
+    //         for record in records {
+    //             kmers.extend(get_unique_kmers(
+    //                 record.unwrap().seq(),
+    //                 &k,
+    //                 &max_kmer_bit,
+    //                 &kmer_overflow_bits,
+    //             ));
+    //         }
+    //         sender.send((tax_index, kmers));
+    //     }));
+    //}
+
+    drop(sender);
+    for (tax_index, kmers) in receiver {
+        for kmer in kmers {
+            annotate_kmer_with_tax(&mut db, kmer, tax_index)
         }
+    }
+
+    for handle in thread_handles {
+        handle.join().unwrap();
     }
 
     serialize_compress_write(output, &db);
@@ -397,6 +459,33 @@ fn annotate_kmer_with_tax(db: &mut AHashMap<usize, Vec<u8>>, kmer: usize, tax_in
             db.insert(kmer, new_tax_vec(tax_index));
         }
     }
+}
+
+fn split_tax_groups_into_chunks<'a>(
+    splits: &usize,
+    metadata_map: &AHashMap<String, MetaEntry>,
+) -> Vec<Vec<MetaEntry>> {
+    let mut splits = *splits;
+    let mut worklists: Vec<Vec<MetaEntry>> = vec![];
+    let metadata_size = metadata_map.len();
+    if metadata_size < splits {
+        splits = metadata_size;
+    }
+
+    let mut chunk_size = metadata_size / splits;
+    if metadata_size % splits != 0 {
+        chunk_size += 1;
+    }
+
+    for metadata in metadata_map.values() {
+        let mut worklist: Vec<MetaEntry> = vec![];
+        for _ in 0..chunk_size {
+            worklist.push(metadata.clone());
+        }
+        worklists.push(worklist);
+    }
+
+    worklists
 }
 
 fn insert_index_tax_bit_in_byte(index_max: usize, tax_index: usize, tax_byte: u8) -> u8 {
@@ -816,7 +905,7 @@ fn get_unique_kmers(
     kmer_set
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct MetaEntry {
     filename: String,
     path: PathBuf,
