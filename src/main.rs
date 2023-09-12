@@ -394,45 +394,29 @@ fn create_db(
                 let decoder = GzDecoder::new(&mut file);
                 let records = fasta::Reader::new(decoder).records();
 
-                let mut kmers: AHashSet<usize> = AHashSet::new();
+                // let mut kmers: AHashSet<usize> = AHashSet::new();
 
                 for record in records {
-                    kmers.extend(get_unique_kmers(
-                        record.unwrap().seq(),
-                        &k,
-                        &max_kmer_bit,
-                        &kmer_overflow_bits,
+                    // kmers.extend(get_unique_kmers(
+                    //     record.unwrap().seq(),
+                    //     &k,
+                    //     &max_kmer_bit,
+                    //     &kmer_overflow_bits,
+                    // ));
+                    sender.send((
+                        tax_index,
+                        get_unique_kmers(
+                            record.unwrap().seq(),
+                            &k,
+                            &max_kmer_bit,
+                            &kmer_overflow_bits,
+                        ),
                     ));
                 }
-                sender.send((tax_index, kmers));
+                // sender.send((tax_index, kmers));
             }
         }));
     }
-
-    // for metadata in metadata_map.values() {
-    //     let sender = sender.clone();
-    //     let tax_index: usize = get_tax_index(metadata, tax_groups);
-    //     let file_path = metadata.path.clone();
-
-    //     thread_handles.push(thread::spawn(move || {
-    //         let mut file = fs::File::open(&file_path).unwrap(); // TODO std::io::Error
-
-    //         let decoder = GzDecoder::new(&mut file);
-    //         let records = fasta::Reader::new(decoder).records();
-
-    //         let mut kmers: AHashSet<usize> = AHashSet::new();
-
-    //         for record in records {
-    //             kmers.extend(get_unique_kmers(
-    //                 record.unwrap().seq(),
-    //                 &k,
-    //                 &max_kmer_bit,
-    //                 &kmer_overflow_bits,
-    //             ));
-    //         }
-    //         sender.send((tax_index, kmers));
-    //     }));
-    //}
 
     drop(sender);
     for (tax_index, kmers) in receiver {
