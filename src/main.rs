@@ -502,13 +502,20 @@ fn split_tax_groups_into_chunks<'a>(
         chunk_size += 1;
     }
 
+    let mut worklist: Vec<MetaEntry> = vec![];
+    let mut current_chunk = 0;
     for metadata in metadata_map.values() {
-        let mut worklist: Vec<MetaEntry> = vec![];
-        for _ in 0..chunk_size {
+        if current_chunk < chunk_size {
+            current_chunk += 1;
             worklist.push(metadata.clone());
+        } else if current_chunk == chunk_size {
+            worklists.push(worklist);
+            worklist = vec![];
+            worklist.push(metadata.clone());
+            current_chunk = 1;
         }
-        worklists.push(worklist);
     }
+    worklists.push(worklist);
 
     worklists
 }
