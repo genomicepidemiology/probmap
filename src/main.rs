@@ -27,10 +27,30 @@ use flate2::Compression;
 use itertools::Itertools;
 use nohash_hasher::NoHashHasher;
 use nohash_hasher::{BuildNoHashHasher, IntMap};
+use phf::phf_set;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 const OUTPUT_EXT: &str = "prmap";
+
+static DB_PREFIX: phf::Set<u8> = phf_set! {
+    0b_0000_0000u8,
+    0b_0000_0001u8,
+    0b_0000_0010u8,
+    0b_0000_0100u8,
+    0b_0000_1000u8,
+    0b_0000_0011u8,
+    0b_0000_0110u8,
+    0b_0000_1100u8,
+    0b_0000_0111u8,
+    0b_0000_1110u8,
+    0b_0000_1111u8,
+    0b_0000_0101u8,
+    0b_0000_1001u8,
+    0b_0000_1010u8,
+    0b_0000_1101u8,
+    0b_0000_1011u8,
+};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -370,67 +390,74 @@ fn create_db(
     output: &PathBuf,
     nthreads: &usize,
 ) {
+    const SPLITS: usize = 10;
+
+    let db_prefix_chunks = split_db_prefix(SPLITS);
+
     let max_kmer_bit = max_bits(k * 2);
     let kmer_overflow_bits = usize::MAX - max_kmer_bit;
 
-    let mut db: AHashMap<usize, Vec<u8>> = AHashMap::with_capacity(100_000_000);
+    for db_prefixes in db_prefix_chunks {
+        let mut db: AHashMap<usize, Vec<u8>> = AHashMap::with_capacity(100_000_000);
 
-    let (sender, receiver) = mpsc::sync_channel::<(usize, AHashSet<usize>)>(1024);
-    let mut thread_handles: Vec<JoinHandle<()>> = vec![];
+        let (sender, receiver) = mpsc::sync_channel::<(usize, AHashSet<usize>)>(1024);
+        let mut thread_handles: Vec<JoinHandle<()>> = vec![];
 
-    let worklists = split_tax_groups_into_chunks(nthreads, metadata_map);
+        let worklists = split_tax_groups_into_chunks(nthreads, metadata_map);
 
-    for worklist in worklists {
-        let sender = sender.clone();
-        let tax_groups = tax_groups.clone();
+        for worklist in worklists {
+            let sender = sender.clone();
+            let tax_groups = tax_groups.clone();
+            let kmer_filter = db_prefixes.clone();
 
-        thread_handles.push(thread::spawn(move || {
-            for metadata in worklist {
-                let tax_index: usize = get_tax_index(&metadata, &tax_groups);
-                let file_path = metadata.path.clone();
+            thread_handles.push(thread::spawn(move || {
+                for metadata in worklist {
+                    let tax_index: usize = get_tax_index(&metadata, &tax_groups);
+                    let file_path = metadata.path.clone();
 
-                let mut file = fs::File::open(&file_path).unwrap(); // TODO std::io::Error
+                    let mut file = fs::File::open(&file_path).unwrap(); // TODO std::io::Error
 
-                let decoder = GzDecoder::new(&mut file);
-                let records = fasta::Reader::new(decoder).records();
+                    let decoder = GzDecoder::new(&mut file);
+                    let records = fasta::Reader::new(decoder).records();
 
-                // let mut kmers: AHashSet<usize> = AHashSet::new();
+                    // let mut kmers: AHashSet<usize> = AHashSet::new();
 
-                for record in records {
-                    // kmers.extend(get_unique_kmers(
-                    //     record.unwrap().seq(),
-                    //     &k,
-                    //     &max_kmer_bit,
-                    //     &kmer_overflow_bits,
-                    // ));
-                    sender.send((
-                        tax_index,
-                        get_unique_kmers(
-                            record.unwrap().seq(),
-                            &k,
-                            &max_kmer_bit,
-                            &kmer_overflow_bits,
-                        ),
-                    ));
+                    for record in records {
+                        // kmers.extend(get_unique_kmers(
+                        //     record.unwrap().seq(),
+                        //     &k,
+                        //     &max_kmer_bit,
+                        //     &kmer_overflow_bits,
+                        // ));
+                        sender.send((
+                            tax_index,
+                            get_unique_kmers(
+                                record.unwrap().seq(),
+                                &k,
+                                &max_kmer_bit,
+                                &kmer_overflow_bits,
+                                &kmer_filter,
+                            ),
+                        ));
+                    }
+                    // sender.send((tax_index, kmers));
                 }
-                // sender.send((tax_index, kmers));
-            }
-        }));
-    }
-
-    drop(sender);
-    for (tax_index, kmers) in receiver {
-        for kmer in kmers {
-            annotate_kmer_with_tax(&mut db, kmer, tax_index)
+            }));
         }
-    }
+        drop(sender);
+        for (tax_index, kmers) in receiver {
+            for kmer in kmers {
+                annotate_kmer_with_tax(&mut db, kmer, tax_index)
+            }
+        }
 
-    for handle in thread_handles {
-        handle.join().unwrap();
-    }
+        for handle in thread_handles {
+            handle.join().unwrap();
+        }
 
-    serialize_compress_write(output, &db);
-    println!("Number of kmers: {}", db.len());
+        serialize_compress_write(output, &db);
+        println!("Number of kmers: {}", db.len());
+    }
 }
 
 fn annotate_kmer_with_tax(db: &mut AHashMap<usize, Vec<u8>>, kmer: usize, tax_index: usize) {
@@ -443,6 +470,24 @@ fn annotate_kmer_with_tax(db: &mut AHashMap<usize, Vec<u8>>, kmer: usize, tax_in
             db.insert(kmer, new_tax_vec(tax_index));
         }
     }
+}
+
+fn split_db_prefix(splits: usize) -> Vec<AHashSet<&'static u8>> {
+    let mut splits_vec: Vec<AHashSet<&u8>> = vec![];
+    let prefix_size = DB_PREFIX.len();
+    let mut chunk_size = prefix_size / splits;
+    if prefix_size % splits != 0 {
+        chunk_size += 1;
+    }
+    for prefix in DB_PREFIX.into_iter() {
+        let mut prefix_chunk: AHashSet<&u8> = AHashSet::new();
+        for _ in 0..chunk_size {
+            prefix_chunk.insert(prefix);
+        }
+        splits_vec.push(prefix_chunk);
+    }
+
+    splits_vec
 }
 
 fn split_tax_groups_into_chunks<'a>(
@@ -852,6 +897,7 @@ fn get_unique_kmers(
     k: &usize,
     max_kmer_bit: &usize,
     kmer_overflow_bits: &usize,
+    filter: &AHashSet<&u8>,
 ) -> AHashSet<usize> {
     let mut kmer_set: AHashSet<usize> = AHashSet::with_capacity(500000);
     let mut kmer: usize = 0;
