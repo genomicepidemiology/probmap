@@ -5,6 +5,19 @@ use bio::io::{
     fasta,
     fastq::{self, Record, Records},
 };
+use brotli::{CompressorReader, CompressorWriter};
+use clap::{builder::OsStr, Parser, Subcommand};
+use colored::*;
+use fast_log::Config;
+use flate2::read::GzDecoder;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
+use itertools::Itertools;
+use log::{error, info, warn};
+use nohash_hasher::NoHashHasher;
+use nohash_hasher::{BuildNoHashHasher, IntMap};
+use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     error::Error,
@@ -17,18 +30,6 @@ use std::{
     sync::mpsc,
     thread::{self, JoinHandle},
 };
-
-use brotli::{CompressorReader, CompressorWriter};
-use clap::{builder::OsStr, Parser, Subcommand};
-use colored::*;
-use flate2::read::GzDecoder;
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
-use itertools::Itertools;
-use nohash_hasher::NoHashHasher;
-use nohash_hasher::{BuildNoHashHasher, IntMap};
-use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
 
 const OUTPUT_EXT: &str = "prmap";
 
@@ -167,20 +168,39 @@ fn main() {
             output,
             threads,
         }) => {
-            println!("Get metadata");
-            let metadata_map = match load_metadata(metadata, gtdb) {
-                Ok(metadata_loaded) => metadata_loaded,
-                Err(_) => unreachable!(),
-            };
-
-            let tax_groups: Vec<String> = get_unique_tax_groups(&metadata_map);
+            // Create output files (log and tax)
             let mut tax_group_file = output.clone();
+            let mut log_file = output.clone();
             let derived_tax_filename = format!(
                 "{}{}",
                 tax_group_file.file_name().unwrap().to_str().unwrap(),
                 "_tax"
             );
+            let derived_log_filename = format!(
+                "{}{}",
+                log_file.file_name().unwrap().to_str().unwrap(),
+                "_log"
+            );
             tax_group_file.set_file_name(derived_tax_filename);
+            log_file.set_file_name(derived_log_filename);
+
+            fast_log::init(
+                Config::new()
+                    .file(log_file.to_str().unwrap())
+                    .chan_len(Some(10000)),
+            )
+            .unwrap();
+
+            log::info!("Loading metadata.");
+
+            let metadata_map = match load_metadata(metadata, gtdb) {
+                Ok(metadata_loaded) => metadata_loaded,
+                Err(_) => unreachable!(),
+            };
+
+            log::info!("Metadata Loaded.");
+
+            let tax_groups: Vec<String> = get_unique_tax_groups(&metadata_map);
             serialize_compress_write(&tax_group_file, &tax_groups);
 
             create_db(&metadata_map, *kmersize, &tax_groups, &output, threads);
@@ -370,6 +390,7 @@ fn create_db(
     output: &PathBuf,
     nthreads: &usize,
 ) {
+    log::info!("Start create_db with {} taxes.", tax_groups.len());
     let max_kmer_bit = max_bits(k * 2);
     let kmer_overflow_bits = usize::MAX - max_kmer_bit;
 
@@ -385,6 +406,7 @@ fn create_db(
         let tax_groups = tax_groups.clone();
 
         thread_handles.push(thread::spawn(move || {
+            log::info!("Start worklist thread.");
             for metadata in worklist {
                 let tax_index: usize = get_tax_index(&metadata, &tax_groups);
                 let file_path = metadata.path.clone();
@@ -413,15 +435,26 @@ fn create_db(
                         ),
                     ));
                 }
+                log::info!(
+                    "worklist thread finished: {:?}",
+                    &file_path.file_name().unwrap()
+                );
                 // sender.send((tax_index, kmers));
             }
         }));
     }
 
     drop(sender);
+
+    let mut length_log = 1000_000;
+
     for (tax_index, kmers) in receiver {
         for kmer in kmers {
             annotate_kmer_with_tax(&mut db, kmer, tax_index)
+        }
+        if length_log < db.len() {
+            length_log += 1000_000 + db.len();
+            log::info!("Reciever got {} kmers.", db.len());
         }
     }
 
@@ -429,8 +462,11 @@ fn create_db(
         handle.join().unwrap();
     }
 
+    log::info!("Finished creating database with {} kmers.", db.len());
+
     serialize_compress_write(output, &db);
-    println!("Number of kmers: {}", db.len());
+
+    log::info!("Wrote database to: {:?}", output.as_os_str());
 }
 
 fn annotate_kmer_with_tax(db: &mut AHashMap<usize, Vec<u8>>, kmer: usize, tax_index: usize) {

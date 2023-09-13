@@ -18,3 +18,5 @@ bincode = "1"
 brotli = "3.3.4"
 colored = "2"
 itertools = "0.10.5"
+log = "0.4"
+fast_log = {version = "1.5" , features = ["lz4","zip","gzip"]}
