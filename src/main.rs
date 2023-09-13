@@ -12,7 +12,7 @@ use fast_log::Config;
 use flate2::read::GzDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use itertools::Itertools;
+use itertools::{enumerate, Itertools};
 use log::{error, info, warn};
 use nohash_hasher::NoHashHasher;
 use nohash_hasher::{BuildNoHashHasher, IntMap};
@@ -401,6 +401,11 @@ fn create_db(
 
     let worklists = split_tax_groups_into_chunks(nthreads, metadata_map);
 
+    log::info!("Spawning {} threads", worklists.len());
+    for (i, worklist) in enumerate(&worklists) {
+        log::info!("\tthread {}: {:?}", i, worklist);
+    }
+
     for worklist in worklists {
         let sender = sender.clone();
         let tax_groups = tax_groups.clone();
@@ -453,7 +458,7 @@ fn create_db(
             annotate_kmer_with_tax(&mut db, kmer, tax_index)
         }
         if length_log < db.len() {
-            length_log += 1000_000 + db.len();
+            length_log = 1000_000 + db.len();
             log::info!("Reciever got {} kmers.", db.len());
         }
     }
