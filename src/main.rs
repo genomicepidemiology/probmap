@@ -5,6 +5,21 @@ use bio::io::{
     fasta,
     fastq::{self, Record, Records},
 };
+use brotli::{CompressorReader, CompressorWriter};
+use clap::{builder::OsStr, Parser, Subcommand};
+use colored::*;
+use fast_log::Config;
+use flate2::read::GzDecoder;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
+use itertools::{enumerate, Itertools};
+use log::{error, info, warn};
+use nohash_hasher::NoHashHasher;
+use nohash_hasher::{BuildNoHashHasher, IntMap};
+use phf::phf_set;
+use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, SmallVec};
 use std::{
     collections::HashMap,
     error::Error,
@@ -18,22 +33,9 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use brotli::{CompressorReader, CompressorWriter};
-use clap::{builder::OsStr, Parser, Subcommand};
-use colored::*;
-use flate2::read::GzDecoder;
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
-use itertools::Itertools;
-use nohash_hasher::NoHashHasher;
-use nohash_hasher::{BuildNoHashHasher, IntMap};
-use phf::phf_set;
-use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
-
 const OUTPUT_EXT: &str = "prmap";
 
-static DB_PREFIX: phf::Set<u8> = phf_set! {
+static DB_PREFIX2: phf::Set<u8> = phf_set! {
     0b_0000_0000u8,
     0b_0000_0001u8,
     0b_0000_0010u8,
@@ -51,6 +53,8 @@ static DB_PREFIX: phf::Set<u8> = phf_set! {
     0b_0000_1101u8,
     0b_0000_1011u8,
 };
+
+static DB_PREFIX: [usize; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -187,20 +191,39 @@ fn main() {
             output,
             threads,
         }) => {
-            println!("Get metadata");
-            let metadata_map = match load_metadata(metadata, gtdb) {
-                Ok(metadata_loaded) => metadata_loaded,
-                Err(_) => unreachable!(),
-            };
-
-            let tax_groups: Vec<String> = get_unique_tax_groups(&metadata_map);
+            // Create output files (log and tax)
             let mut tax_group_file = output.clone();
+            let mut log_file = output.clone();
             let derived_tax_filename = format!(
                 "{}{}",
                 tax_group_file.file_name().unwrap().to_str().unwrap(),
                 "_tax"
             );
+            let derived_log_filename = format!(
+                "{}{}",
+                log_file.file_name().unwrap().to_str().unwrap(),
+                "_log"
+            );
             tax_group_file.set_file_name(derived_tax_filename);
+            log_file.set_file_name(derived_log_filename);
+
+            fast_log::init(
+                Config::new()
+                    .file(log_file.to_str().unwrap())
+                    .chan_len(Some(10000)),
+            )
+            .unwrap();
+
+            log::info!("Loading metadata.");
+
+            let metadata_map = match load_metadata(metadata, gtdb) {
+                Ok(metadata_loaded) => metadata_loaded,
+                Err(_) => unreachable!(),
+            };
+
+            log::info!("Metadata Loaded.");
+
+            let tax_groups: Vec<String> = get_unique_tax_groups(&metadata_map);
             serialize_compress_write(&tax_group_file, &tax_groups);
 
             create_db(&metadata_map, *kmersize, &tax_groups, &output, threads);
@@ -390,6 +413,7 @@ fn create_db(
     output: &PathBuf,
     nthreads: &usize,
 ) {
+    log::info!("Start create_db with {} taxes.", tax_groups.len());
     const SPLITS: usize = 10;
 
     let db_prefix_chunks = split_db_prefix(SPLITS);
@@ -397,7 +421,9 @@ fn create_db(
     let max_kmer_bit = max_bits(k * 2);
     let kmer_overflow_bits = usize::MAX - max_kmer_bit;
 
-    for db_prefixes in db_prefix_chunks {
+    log::info!("Will split index in {} chunks", db_prefix_chunks.len());
+    for (db_index, db_prefixes) in enumerate(db_prefix_chunks) {
+        log::info!("Creating index for index split: {:?}", &db_prefixes);
         let mut db: AHashMap<usize, Vec<u8>> = AHashMap::with_capacity(100_000_000);
 
         let (sender, receiver) = mpsc::sync_channel::<(usize, AHashSet<usize>)>(1024);
@@ -405,12 +431,18 @@ fn create_db(
 
         let worklists = split_tax_groups_into_chunks(nthreads, metadata_map);
 
+        log::info!("Spawning {} threads", worklists.len());
+        for (i, worklist) in enumerate(&worklists) {
+            log::info!("\tthread {}: {:?}", i, worklist);
+        }
+
         for worklist in worklists {
             let sender = sender.clone();
             let tax_groups = tax_groups.clone();
             let kmer_filter = db_prefixes.clone();
 
             thread_handles.push(thread::spawn(move || {
+                log::info!("Start worklist thread.");
                 for metadata in worklist {
                     let tax_index: usize = get_tax_index(&metadata, &tax_groups);
                     let file_path = metadata.path.clone();
@@ -440,14 +472,25 @@ fn create_db(
                             ),
                         ));
                     }
+                    log::info!(
+                        "worklist thread finished: {:?}",
+                        &file_path.file_name().unwrap()
+                    );
                     // sender.send((tax_index, kmers));
                 }
             }));
         }
         drop(sender);
+
+        let mut length_log = 1000_000;
+
         for (tax_index, kmers) in receiver {
             for kmer in kmers {
                 annotate_kmer_with_tax(&mut db, kmer, tax_index)
+            }
+            if length_log < db.len() {
+                length_log = 1000_000 + db.len();
+                log::info!("Reciever got {} kmers.", db.len());
             }
         }
 
@@ -455,8 +498,24 @@ fn create_db(
             handle.join().unwrap();
         }
 
-        serialize_compress_write(output, &db);
-        println!("Number of kmers: {}", db.len());
+        log::info!(
+            "Finished creating split with prefixes {:?} with {} kmers.",
+            &db_prefixes,
+            db.len()
+        );
+
+        let mut output_split_filename = output.file_name().unwrap().to_owned();
+        output_split_filename.push(db_index.to_string());
+        let mut output_split = output.clone();
+        output_split.set_file_name(output_split_filename);
+
+        serialize_compress_write(&output_split, &db);
+
+        log::info!(
+            "Wrote database with prefixes {:?} to: {:?}",
+            &db_prefixes,
+            output.as_os_str()
+        );
     }
 }
 
@@ -472,17 +531,19 @@ fn annotate_kmer_with_tax(db: &mut AHashMap<usize, Vec<u8>>, kmer: usize, tax_in
     }
 }
 
-fn split_db_prefix(splits: usize) -> Vec<AHashSet<&'static u8>> {
-    let mut splits_vec: Vec<AHashSet<&u8>> = vec![];
+fn split_db_prefix(splits: usize) -> Vec<SmallVec<[&'static usize; 16]>> {
+    let mut splits_vec: Vec<SmallVec<[&usize; 16]>> = vec![];
     let prefix_size = DB_PREFIX.len();
     let mut chunk_size = prefix_size / splits;
     if prefix_size % splits != 0 {
         chunk_size += 1;
     }
-    for prefix in DB_PREFIX.into_iter() {
-        let mut prefix_chunk: AHashSet<&u8> = AHashSet::new();
-        for _ in 0..chunk_size {
-            prefix_chunk.insert(prefix);
+
+    for i in (0..prefix_size).step_by(chunk_size) {
+        let mut prefix_chunk: SmallVec<[&usize; 16]> = smallvec![&0; chunk_size];
+        // let mut prefix_chunk = [0usize; chunk_size];
+        for j in 0..chunk_size {
+            prefix_chunk[j] = &DB_PREFIX[i + j];
         }
         splits_vec.push(prefix_chunk);
     }
@@ -506,13 +567,20 @@ fn split_tax_groups_into_chunks<'a>(
         chunk_size += 1;
     }
 
+    let mut worklist: Vec<MetaEntry> = vec![];
+    let mut current_chunk = 0;
     for metadata in metadata_map.values() {
-        let mut worklist: Vec<MetaEntry> = vec![];
-        for _ in 0..chunk_size {
+        if current_chunk < chunk_size {
+            current_chunk += 1;
             worklist.push(metadata.clone());
+        } else if current_chunk == chunk_size {
+            worklists.push(worklist);
+            worklist = vec![];
+            worklist.push(metadata.clone());
+            current_chunk = 1;
         }
-        worklists.push(worklist);
     }
+    worklists.push(worklist);
 
     worklists
 }
@@ -897,7 +965,7 @@ fn get_unique_kmers(
     k: &usize,
     max_kmer_bit: &usize,
     kmer_overflow_bits: &usize,
-    filter: &AHashSet<&u8>,
+    filter: &SmallVec<[&usize; 16]>,
 ) -> AHashSet<usize> {
     let mut kmer_set: AHashSet<usize> = AHashSet::with_capacity(500000);
     let mut kmer: usize = 0;
@@ -907,9 +975,25 @@ fn get_unique_kmers(
         kmer <<= 2;
 
         match nuc2int(nuc) {
-            Ok(nuc_int) => kmer += nuc_int,
+            Ok(nuc_int) => {
+                kmer += nuc_int;
+                // Check if combination of the first two nucleotides are in
+                // filter
+                let comparison_bit = kmer & 15;
+                let mut ignore_kmer = true;
+                for filter_bit in filter {
+                    if comparison_bit == **filter_bit {
+                        ignore_kmer = false;
+                    }
+                }
+                if ignore_kmer {
+                    // Ignore only this kmer
+                    ignore_count += 1;
+                }
+            }
             Err(_) => {
-                ignore_count += k // Ignore nucs as long as kmer contains a non-nuc
+                // Ignore nucs as long as kmer contains a non-nuc
+                ignore_count += k
             }
         }
 
@@ -1116,10 +1200,10 @@ mod test {
 
         let max_kmer_bit = max_bits(k * 2);
         let kmer_overflow_bits = usize::MAX - max_kmer_bit;
+        let filter: SmallVec<[&usize; 16]> = SmallVec::from_iter(&DB_PREFIX);
 
-        //let mut kmer_set: AHashSet<usize> = AHashSet::new();
-
-        let kmer_set = get_unique_kmers(nuc_string, &k, &max_kmer_bit, &kmer_overflow_bits);
+        let kmer_set =
+            get_unique_kmers(nuc_string, &k, &max_kmer_bit, &kmer_overflow_bits, &filter);
 
         assert_eq!(kmer_set.len(), 3);
         assert_eq!(kmer_set.contains(&126), true);
@@ -1128,6 +1212,12 @@ mod test {
         assert_eq!(kmer_set.contains(&507), false);
         assert_eq!(kmer_set.contains(&1005), false);
         assert_eq!(kmer_set.contains(&999999), false);
+
+        let filter2: SmallVec<[&usize; 16]> = smallvec![&14];
+        let kmer_set2 =
+            get_unique_kmers(nuc_string, &k, &max_kmer_bit, &kmer_overflow_bits, &filter2);
+        assert_eq!(kmer_set2.len(), 1);
+        assert_eq!(kmer_set2.contains(&126), true);
     }
 
     #[test]
@@ -1400,5 +1490,24 @@ mod test {
             let expect_mult = (expected_result[i] * 1000f64).round();
             assert_eq!(entry_mult, expect_mult);
         }
+    }
+
+    #[test]
+    fn test_split_db_prefix() {
+        let prefixes = split_db_prefix(10);
+        assert_eq!(*prefixes[0][0], 0);
+        assert_eq!(*prefixes[0][1], 1);
+        assert_eq!(*prefixes[1][0], 2);
+        assert_eq!(*prefixes[1][1], 3);
+
+        let prefixes = split_db_prefix(1);
+        assert_eq!(*prefixes[0][0], 0);
+        assert_eq!(*prefixes[0][3], 3);
+        assert_eq!(*prefixes[0][15], 15);
+
+        let prefixes = split_db_prefix(16);
+        assert_eq!(*prefixes[0][0], 0);
+        assert_eq!(*prefixes[3][0], 3);
+        assert_eq!(*prefixes[15][0], 15);
     }
 }
