@@ -20,6 +20,7 @@ use phf::phf_set;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
+use std::io::BufWriter;
 use std::{
     collections::HashMap,
     error::Error,
@@ -514,7 +515,7 @@ fn create_db(
         log::info!(
             "Wrote database with prefixes {:?} to: {:?}",
             &db_prefixes,
-            output.as_os_str()
+            output_split.as_os_str()
         );
     }
 }
@@ -843,9 +844,10 @@ fn serialize_compress_write<T>(output: &PathBuf, object: &T)
 where
     T: Serialize,
 {
-    let mut out_file = File::create(output).unwrap();
+    let out_file = File::create(output).unwrap();
+    let mut buffer = BufWriter::with_capacity(1000_000, out_file);
     let mut comp = brotli::CompressorWriter::new(
-        &mut out_file,
+        &mut buffer,
         4096,      // buffer size
         6 as u32,  // quality 0-11
         20 as u32, // lg_window_size
