@@ -16,7 +16,6 @@ use itertools::{enumerate, Itertools};
 use log::{error, info, warn};
 use nohash_hasher::NoHashHasher;
 use nohash_hasher::{BuildNoHashHasher, IntMap};
-use phf::phf_set;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
@@ -35,26 +34,6 @@ use std::{
 };
 
 const OUTPUT_EXT: &str = "prmap";
-
-static DB_PREFIX2: phf::Set<u8> = phf_set! {
-    0b_0000_0000u8,
-    0b_0000_0001u8,
-    0b_0000_0010u8,
-    0b_0000_0100u8,
-    0b_0000_1000u8,
-    0b_0000_0011u8,
-    0b_0000_0110u8,
-    0b_0000_1100u8,
-    0b_0000_0111u8,
-    0b_0000_1110u8,
-    0b_0000_1111u8,
-    0b_0000_0101u8,
-    0b_0000_1001u8,
-    0b_0000_1010u8,
-    0b_0000_1101u8,
-    0b_0000_1011u8,
-};
-
 static DB_PREFIX: [usize; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 #[derive(Parser)]
@@ -192,21 +171,9 @@ fn main() {
             output,
             threads,
         }) => {
-            // Create output files (log and tax)
-            let mut tax_group_file = output.clone();
-            let mut log_file = output.clone();
-            let derived_tax_filename = format!(
-                "{}{}",
-                tax_group_file.file_name().unwrap().to_str().unwrap(),
-                "_tax"
-            );
-            let derived_log_filename = format!(
-                "{}{}",
-                log_file.file_name().unwrap().to_str().unwrap(),
-                "_log"
-            );
-            tax_group_file.set_file_name(derived_tax_filename);
-            log_file.set_file_name(derived_log_filename);
+            let tax_group_file = create_file_path(&output, "tax", "probmap");
+            let log_file = create_file_path(&output, "", "log");
+            let info_file = create_file_path(&output, "", "probmap");
 
             fast_log::init(
                 Config::new()
@@ -227,10 +194,41 @@ fn main() {
             let tax_groups: Vec<String> = get_unique_tax_groups(&metadata_map);
             serialize_compress_write(&tax_group_file, &tax_groups);
 
-            create_db(&metadata_map, *kmersize, &tax_groups, &output, threads);
+            let index_files: Vec<PathBuf> =
+                create_db(&metadata_map, *kmersize, &tax_groups, &output, threads);
+
+            let index_info = IndexInfo {
+                k: *kmersize,
+                tax_file: tax_group_file
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                index_files,
+            };
+            serialize_compress_write(&info_file, &index_info);
+
+            println!("{:?}", index_info);
         }
         None => {}
     }
+}
+
+fn create_file_path(base_file: &PathBuf, append: &str, ext: &str) -> PathBuf {
+    let mut file_path = base_file.clone();
+
+    if append != "" {
+        let derived_filename = format!(
+            "{}_{}",
+            file_path.file_name().unwrap().to_str().unwrap(),
+            append
+        );
+        file_path.set_file_name(derived_filename);
+    }
+
+    file_path.set_extension(ext);
+    file_path
 }
 
 fn get_unique_tax_groups(metadata_map: &AHashMap<String, MetaEntry>) -> Vec<String> {
@@ -413,11 +411,13 @@ fn create_db(
     tax_groups: &Vec<String>,
     output: &PathBuf,
     nthreads: &usize,
-) {
+) -> Vec<PathBuf> {
     log::info!("Start create_db with {} taxes.", tax_groups.len());
     const SPLITS: usize = 10;
 
     let db_prefix_chunks = split_db_prefix(SPLITS);
+
+    let mut index_files: Vec<PathBuf> = vec![];
 
     let max_kmer_bit = max_bits(k * 2);
     let kmer_overflow_bits = usize::MAX - max_kmer_bit;
@@ -505,19 +505,24 @@ fn create_db(
             db.len()
         );
 
-        let mut output_split_filename = output.file_name().unwrap().to_owned();
-        output_split_filename.push(db_index.to_string());
-        let mut output_split = output.clone();
-        output_split.set_file_name(output_split_filename);
+        // let mut output_split_filename = output.file_name().unwrap().to_owned();
+        // output_split_filename.push(db_index.to_string());
+        // let mut output_split = output.clone();
+        // output_split.set_file_name(output_split_filename);
 
+        let output_split = create_file_path(&output, &db_index.to_string(), "probmap");
         serialize_compress_write(&output_split, &db);
 
         log::info!(
             "Wrote database with prefixes {:?} to: {:?}",
             &db_prefixes,
-            output_split.as_os_str()
+            &output_split.as_os_str()
         );
+
+        index_files.push(output_split);
     }
+
+    index_files
 }
 
 fn annotate_kmer_with_tax(db: &mut AHashMap<usize, Vec<u8>>, kmer: usize, tax_index: usize) {
@@ -846,13 +851,13 @@ where
 {
     let out_file = File::create(output).unwrap();
     let mut buffer = BufWriter::with_capacity(1000_000, out_file);
-    let mut comp = brotli::CompressorWriter::new(
-        &mut buffer,
-        4096,      // buffer size
-        6 as u32,  // quality 0-11
-        20 as u32, // lg_window_size
-    );
-    bincode::serialize_into(&mut comp, object);
+    // let mut comp = brotli::CompressorWriter::new(
+    //     &mut buffer,
+    //     4096,      // buffer size
+    //     6 as u32,  // quality 0-11
+    //     20 as u32, // lg_window_size
+    // );
+    bincode::serialize_into(&mut buffer, object);
 }
 
 fn get_tax_index(meta_entry: &MetaEntry, tax_groups: &Vec<String>) -> usize {
@@ -1027,6 +1032,13 @@ struct MetaEntry {
     path: PathBuf,
     ncbi_taxid: u32,
     gtdb_tax: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct IndexInfo {
+    k: usize,
+    tax_file: String,
+    index_files: Vec<PathBuf>,
 }
 
 fn load_metadata(
