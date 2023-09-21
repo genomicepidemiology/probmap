@@ -33,6 +33,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+const IO_BLOCKSIZE: usize = 16_777_216;
 const OUTPUT_EXT: &str = "prmap";
 static DB_PREFIX: [usize; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
@@ -850,7 +851,7 @@ where
     T: Serialize,
 {
     let out_file = File::create(output).unwrap();
-    let mut buffer = BufWriter::with_capacity(1000_000, out_file);
+    let mut buffer = BufWriter::with_capacity(IO_BLOCKSIZE, out_file);
     // let mut comp = brotli::CompressorWriter::new(
     //     &mut buffer,
     //     4096,      // buffer size
@@ -974,7 +975,7 @@ fn get_unique_kmers(
     kmer_overflow_bits: &usize,
     filter: &SmallVec<[&usize; 16]>,
 ) -> AHashSet<usize> {
-    let mut kmer_set: AHashSet<usize> = AHashSet::with_capacity(500000);
+    let mut kmer_set: AHashSet<usize> = AHashSet::with_capacity(500_000);
     let mut kmer: usize = 0;
     let mut ignore_count = 0;
 
@@ -984,19 +985,6 @@ fn get_unique_kmers(
         match nuc2int(nuc) {
             Ok(nuc_int) => {
                 kmer += nuc_int;
-                // Check if combination of the first two nucleotides are in
-                // filter
-                let comparison_bit = kmer & 15;
-                let mut ignore_kmer = true;
-                for filter_bit in filter {
-                    if comparison_bit == **filter_bit {
-                        ignore_kmer = false;
-                    }
-                }
-                if ignore_kmer {
-                    // Ignore only this kmer
-                    ignore_count += 1;
-                }
             }
             Err(_) => {
                 // Ignore nucs as long as kmer contains a non-nuc
@@ -1016,14 +1004,32 @@ fn get_unique_kmers(
         if nuc_string_index >= *k - 1 {
             let kmer_rev_comp = rev_comp(kmer, *kmer_overflow_bits, *k);
             if kmer <= kmer_rev_comp {
+                if ignore_kmer(kmer, &filter) {
+                    continue;
+                };
                 kmer_set.insert(kmer);
             } else {
+                if ignore_kmer(kmer_rev_comp, &filter) {
+                    continue;
+                };
                 kmer_set.insert(kmer_rev_comp);
             }
         }
     }
 
     kmer_set
+}
+
+fn ignore_kmer(kmer: usize, filter: &SmallVec<[&usize; 16]>) -> bool {
+    // Check if combination of the first two nucleotides are in
+    // filter
+    let comparison_bit = kmer & 15;
+    for filter_bit in filter {
+        if comparison_bit == **filter_bit {
+            return false;
+        }
+    }
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -1227,11 +1233,15 @@ mod test {
         assert_eq!(kmer_set.contains(&1005), false);
         assert_eq!(kmer_set.contains(&999999), false);
 
-        let filter2: SmallVec<[&usize; 16]> = smallvec![&14];
+        let filter2: SmallVec<[&usize; 16]> = smallvec![&14, &11];
         let kmer_set2 =
             get_unique_kmers(nuc_string, &k, &max_kmer_bit, &kmer_overflow_bits, &filter2);
         assert_eq!(kmer_set2.len(), 1);
         assert_eq!(kmer_set2.contains(&126), true);
+        // 507 is in filter, but is > 66 which is not in filter, hence both
+        // should be ignored.
+        assert_eq!(kmer_set2.contains(&507), false);
+        assert_eq!(kmer_set2.contains(&66), false);
     }
 
     #[test]
