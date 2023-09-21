@@ -428,7 +428,7 @@ fn create_db(
         log::info!("Creating index for index split: {:?}", &db_prefixes);
         let mut db: AHashMap<usize, Vec<u8>> = AHashMap::with_capacity(100_000_000);
 
-        let (sender, receiver) = mpsc::sync_channel::<(usize, AHashSet<usize>)>(1024);
+        let (sender, receiver) = mpsc::sync_channel::<(usize, AHashSet<usize>)>(64);
         let mut thread_handles: Vec<JoinHandle<()>> = vec![];
 
         let worklists = split_tax_groups_into_chunks(nthreads, metadata_map);
