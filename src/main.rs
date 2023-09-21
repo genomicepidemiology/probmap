@@ -414,7 +414,7 @@ fn create_db(
     nthreads: &usize,
 ) -> Vec<PathBuf> {
     log::info!("Start create_db with {} taxes.", tax_groups.len());
-    const SPLITS: usize = 10;
+    const SPLITS: usize = 16;
 
     let db_prefix_chunks = split_db_prefix(SPLITS);
 
@@ -444,7 +444,10 @@ fn create_db(
             let kmer_filter = db_prefixes.clone();
 
             thread_handles.push(thread::spawn(move || {
-                log::info!("Start worklist thread.");
+                log::info!(
+                    "Start worklist thread with the kmer filter {:?}",
+                    kmer_filter
+                );
                 for metadata in worklist {
                     let tax_index: usize = get_tax_index(&metadata, &tax_groups);
                     let file_path = metadata.path.clone();
@@ -513,6 +516,11 @@ fn create_db(
 
         let output_split = create_file_path(&output, &db_index.to_string(), "probmap");
         serialize_compress_write(&output_split, &db);
+
+        // TODO DEBUG
+        // for key in db.keys() {
+        //     log::info!("{}", kmer_int_2_kmer_str(*key, k));
+        // }
 
         log::info!(
             "Wrote database with prefixes {:?} to: {:?}",
@@ -884,6 +892,29 @@ fn nuc2int(nuc: &u8) -> Result<usize, usize> {
         b'c' => Ok(1),
         _ => Err(99),
     }
+}
+
+fn int2nuc(n: usize) -> Result<&'static str, ()> {
+    match n {
+        0 => Ok("A"),
+        1 => Ok("C"),
+        2 => Ok("G"),
+        3 => Ok("T"),
+        _ => unreachable!(),
+    }
+}
+
+fn kmer_int_2_kmer_str(kmer_int: usize, k: usize) -> String {
+    let bit_mask: usize = 3;
+    let mut kmer_int_cache = kmer_int.clone();
+    let mut kmer_list: Vec<&str> = vec![];
+    for _ in 0..k {
+        let nuc_int = kmer_int_cache & bit_mask;
+        kmer_list.push(int2nuc(nuc_int).unwrap());
+        kmer_int_cache >>= 2;
+    }
+    kmer_list.reverse();
+    String::from_iter(kmer_list)
 }
 
 /*
@@ -1533,5 +1564,31 @@ mod test {
         assert_eq!(*prefixes[0][0], 0);
         assert_eq!(*prefixes[3][0], 3);
         assert_eq!(*prefixes[15][0], 15);
+    }
+
+    #[test]
+    fn test_kmer_int_2_kmer_str() {
+        let k = 5;
+        /*
+         * string: ACTTGTC
+         *      bit repr: 00 01 11 11 10 11 01
+         *
+         * kmers: ACTTG CTTGT TTGTC
+         *      ACTTG bit: 00 01 11 11 10 -->  126
+         *      CTTGT bit: 01 11 11 10 11 -->  507
+         *      TTGTC bit: 11 11 10 11 01 --> 1005
+         * rev_comp_kmers: CAAGT ACAAG GACAA
+         *      CAAGT bit: 01 00 00 10 11 -->  267
+         *      ACAAG bit: 00 01 00 00 10 -->   66
+         *      GACAA bit: 10 00 01 00 00 -->  528
+         *
+         * Expect kmers extracted: 126, 66, 528
+         */
+        assert_eq!(kmer_int_2_kmer_str(126, k), "ACTTG");
+        assert_eq!(kmer_int_2_kmer_str(507, k), "CTTGT");
+        assert_eq!(kmer_int_2_kmer_str(1005, k), "TTGTC");
+        assert_eq!(kmer_int_2_kmer_str(267, k), "CAAGT");
+        assert_eq!(kmer_int_2_kmer_str(66, k), "ACAAG");
+        assert_eq!(kmer_int_2_kmer_str(528, k), "GACAA");
     }
 }
