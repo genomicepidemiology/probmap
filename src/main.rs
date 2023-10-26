@@ -426,7 +426,7 @@ fn create_db(
     log::info!("Will split index in {} chunks", db_prefix_chunks.len());
     for (db_index, db_prefixes) in enumerate(db_prefix_chunks) {
         log::info!("Creating index for index split: {:?}", &db_prefixes);
-        let mut db: AHashMap<usize, Vec<u8>> = AHashMap::with_capacity(100_000_000);
+        let mut db: AHashMap<usize, Vec<u16>> = AHashMap::with_capacity(100_000_000);
 
         let (sender, receiver) = mpsc::sync_channel::<(usize, AHashSet<usize>)>(64);
         let mut thread_handles: Vec<JoinHandle<()>> = vec![];
@@ -534,14 +534,16 @@ fn create_db(
     index_files
 }
 
-fn annotate_kmer_with_tax(db: &mut AHashMap<usize, Vec<u8>>, kmer: usize, tax_index: usize) {
-    match db.get(&kmer) {
+fn annotate_kmer_with_tax(db: &mut AHashMap<usize, Vec<u16>>, kmer: usize, tax_index: usize) {
+    match db.get_mut(&kmer) {
         Some(tax_vec) => {
-            let new_tax_vec = insert_index_into_tax_vec(&tax_vec, tax_index);
-            db.insert(kmer, new_tax_vec);
+            // let new_tax_vec = insert_index_into_tax_vec(&tax_vec, tax_index);
+            // db.insert(kmer, new_tax_vec);
+            tax_vec.push(tax_index as u16);
         }
         None => {
-            db.insert(kmer, new_tax_vec(tax_index));
+            //db.insert(kmer, new_tax_vec(tax_index));
+            db.insert(kmer, vec![tax_index as u16]);
         }
     }
 }
