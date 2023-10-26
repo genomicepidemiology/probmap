@@ -35,7 +35,7 @@ use std::{
 
 const IO_BLOCKSIZE: usize = 16_777_216;
 const OUTPUT_EXT: &str = "prmap";
-static DB_PREFIX: [usize; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+static DB_PREFIX: [usize; 16] = [0, 15, 4, 11, 8, 7, 9, 3, 5, 14, 1, 10, 13, 2, 6, 12];
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
