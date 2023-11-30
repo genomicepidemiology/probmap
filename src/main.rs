@@ -338,7 +338,8 @@ fn calc_prob_from_input(
         let db_prefix_chunk = &temp_db_prefix[i];
 
         let index_file = File::open(file_path).unwrap();
-        let kmer_db: AHashMap<usize, Vec<u16>> = bincode::deserialize_from(index_file).unwrap();
+        let index_buffer = BufReader::with_capacity(IO_BLOCKSIZE, index_file);
+        let kmer_db: AHashMap<usize, Vec<u16>> = bincode::deserialize_from(index_buffer).unwrap();
         log::info!("  - file loaded");
 
         let mut fq_records: Vec<Records<BufReader<GzDecoder<File>>>> = input
