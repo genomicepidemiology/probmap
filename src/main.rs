@@ -181,6 +181,12 @@ fn main() {
             // TODO DEBUG print
             // println!("tax_groups: {:?}", tax_groups);
 
+            log::info!("Using {} threads.", threads);
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(*threads)
+                .build_global()
+                .unwrap();
+
             let species_probs = match calc_prob_from_input(
                 &index_info.k,
                 &index_info.index_files,
