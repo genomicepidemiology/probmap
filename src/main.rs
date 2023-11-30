@@ -34,7 +34,8 @@ use std::{
 };
 use std::{io::BufWriter, usize};
 
-const IO_BLOCKSIZE: usize = 16_777_216;
+// const IO_BLOCKSIZE: usize = 16_777_216;
+const IO_BLOCKSIZE: usize = 67_108_864;
 const OUTPUT_EXT: &str = "probmap";
 static DB_PREFIX: [usize; 16] = [0, 15, 4, 11, 8, 7, 9, 3, 5, 14, 1, 10, 13, 2, 6, 12];
 
@@ -192,7 +193,6 @@ fn main() {
                 &index_info.index_files,
                 &input,
                 &tax_groups,
-                &threads,
             ) {
                 Ok(species_sum_probs) => species_sum_probs,
                 Err(_) => {
@@ -295,7 +295,6 @@ fn calc_prob_from_input(
     index_files: &Vec<PathBuf>,
     input: &Vec<PathBuf>,
     tax_groups: &Vec<String>,
-    nthreads: &usize,
 ) -> Result<Vec<f64>, std::io::Error> {
     log::info!("Start mapping.");
     // NOTES:
@@ -373,6 +372,8 @@ fn calc_prob_from_input(
 
         let species_distr: Vec<f64> =
             annotate_kmers(kmers, total_kmers, &kmer_db, prior, tax_groups.len());
+
+        log::info!("Annotation done.");
 
         for (i, prob) in species_distr.iter().enumerate() {
             species_sum_probs[i] += *prob;
