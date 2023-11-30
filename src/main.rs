@@ -339,6 +339,7 @@ fn calc_prob_from_input(
 
         let index_file = File::open(file_path).unwrap();
         let kmer_db: AHashMap<usize, Vec<u16>> = bincode::deserialize_from(index_file).unwrap();
+        log::info!("  - file loaded");
 
         let mut fq_records: Vec<Records<BufReader<GzDecoder<File>>>> = input
             .iter()
@@ -350,6 +351,7 @@ fn calc_prob_from_input(
         let mut kmers: Vec<usize> = vec![];
 
         while let Some(fastq_chunk) = load_chunk_of_fastq(&mut fq_records, 1_000_000) {
+            log::info!("Loaded 1_000_000 fastq records");
             if i == 0 {
                 record_counter += fastq_chunk.len();
                 // log::info!("Mapping: {}", &record_counter);
