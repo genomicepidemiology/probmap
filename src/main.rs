@@ -28,6 +28,7 @@ use std::{
     hash::BuildHasherDefault,
     hash::Hash,
     io::BufReader,
+    io::Write,
     path::{Path, PathBuf},
     sync::mpsc,
     thread::{self, JoinHandle},
@@ -35,7 +36,8 @@ use std::{
 use std::{io::BufWriter, usize};
 
 // const IO_BLOCKSIZE: usize = 16_777_216;
-const IO_BLOCKSIZE: usize = 67_108_864;
+// const IO_BLOCKSIZE: usize = 67_108_864;
+const IO_BLOCKSIZE: usize = 1024 * 1024 * 2;
 const OUTPUT_EXT: &str = "probmap";
 static DB_PREFIX: [usize; 16] = [0, 15, 4, 11, 8, 7, 9, 3, 5, 14, 1, 10, 13, 2, 6, 12];
 
@@ -188,7 +190,7 @@ fn main() {
                 .build_global()
                 .unwrap();
 
-            let species_probs = match calc_prob_from_input(
+            let (species_probs, total_tmp_kmer_count) = match calc_prob_from_input(
                 &index_info.k,
                 &index_info.index_files,
                 &input,
@@ -200,6 +202,13 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+
+            let kmer_count_path = create_file_path(&output.clone().unwrap(), "tmp_kmer_count", "txt");
+            let kmer_count_file = File::create(kmer_count_path).unwrap();
+            let mut buffer = BufWriter::with_capacity(IO_BLOCKSIZE, kmer_count_file);
+            for count in total_tmp_kmer_count {
+                writeln!(buffer, "{}", count).unwrap();
+            }
 
             let most_probable_indeces = get_largest_values(&species_probs, 20);
             println!("most_probable_indeces: {:?}", &most_probable_indeces);
@@ -295,7 +304,7 @@ fn calc_prob_from_input(
     index_files: &Vec<PathBuf>,
     input: &Vec<PathBuf>,
     tax_groups: &Vec<String>,
-) -> Result<Vec<f64>, std::io::Error> {
+) -> Result<(Vec<f64>, Vec<u16>), std::io::Error> {
     log::info!("Start mapping.");
     // NOTES:
     // let mut db: AHashMap<usize, Vec<u16>>
@@ -331,6 +340,9 @@ fn calc_prob_from_input(
         smallvec![6],
         smallvec![12],
     ];
+
+    // TODO: Remove this temp vec
+    let mut total_tmp_kmer_count: Vec<u16> = vec![];
 
     for (i, file_path) in enumerate(index_files) {
         log::info!("Mapping to file {:?}", &file_path);
@@ -370,7 +382,7 @@ fn calc_prob_from_input(
         let total_kmers = kmers.len();
         log::info!("Kmers total {}", total_kmers);
 
-        let species_distr: Vec<f64> =
+        let (species_distr, mut temp_kmer_count) =
             annotate_kmers(kmers, total_kmers, &kmer_db, prior, tax_groups.len());
 
         log::info!("Annotation done.");
@@ -378,6 +390,8 @@ fn calc_prob_from_input(
         for (i, prob) in species_distr.iter().enumerate() {
             species_sum_probs[i] += *prob;
         }
+
+        total_tmp_kmer_count.append(&mut temp_kmer_count);
     }
 
     for sum_prob in species_sum_probs.iter_mut() {
@@ -389,7 +403,7 @@ fn calc_prob_from_input(
     // println!("species sum prob {:?}", species_sum_probs);
     println!("Reads value: {}", record_counter);
 
-    Ok(species_sum_probs)
+    Ok((species_sum_probs, total_tmp_kmer_count))
 }
 
 fn get_largest_values(data: &Vec<f64>, count: usize) -> Vec<(f64, usize)> {
@@ -464,7 +478,7 @@ fn annotate_kmers<T>(
     db: &AHashMap<usize, Vec<u16>>,
     prior: f64,
     tax_groups_length: usize,
-) -> Vec<f64>
+) -> (Vec<f64>, Vec<u16>)
 where
     T: IntoParallelIterator<Item = usize>,
 {
@@ -482,8 +496,16 @@ where
 
     let known_kmers = tax_lists.len();
 
-    for tax_index in tax_lists.into_iter().flatten() {
-        sample_counts[*tax_index as usize + 1] += 1;
+    // for tax_index in tax_lists.into_iter().flatten() {
+    //     sample_counts[*tax_index as usize + 1] += 1;
+    // }
+    // TODO: Remove this temp vec
+    let mut temp_kmer_count: Vec<u16> = vec![];
+    for tax_list in tax_lists.into_iter() {
+        temp_kmer_count.push(tax_list.len() as u16);
+        for tax_index in tax_list {
+            sample_counts[*tax_index as usize + 1] += 1;
+        }
     }
 
     let unknown_kmers = total_kmer_count - known_kmers;
@@ -516,7 +538,7 @@ where
     //     }
     // }
 
-    calc_probs(&sample_counts, prior)
+    (calc_probs(&sample_counts, prior), temp_kmer_count)
 }
 
 fn extract_tax_from_list(tax_list: &Vec<u8>) -> Vec<usize> {
